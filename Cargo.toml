@@ -1,0 +1,11 @@
+[package]
+name = "ghost"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+regex = "1.11.1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_yaml = "0.9.34"
+walkdir = "2.5.0"
+argh = "0.1.12"

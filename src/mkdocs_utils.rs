@@ -269,22 +269,41 @@ fn normalise_url(path: &Path) -> String {
 }
 
 pub fn resolve_link(from_src: &Path, link: &str, maps: &LinkMaps) -> Option<PathBuf> {
-    let rendered = rendered_url_for_link(from_src, link, maps)?;
-    lookup_url(&rendered, &maps.url_to_src)
+    let rendered_candidates = rendered_url_for_link(from_src, link, maps)?;
+    for rendered in rendered_candidates {
+        if let Some(hit) = lookup_url(&rendered, &maps.url_to_src) {
+            return Some(hit);
+        }
+    }
+    None
 }
 
-fn rendered_url_for_link(from_src: &Path, link: &str, maps: &LinkMaps) -> Option<String> {
+fn rendered_url_for_link(from_src: &Path, link: &str, maps: &LinkMaps) -> Option<Vec<String>> {
     let from_url = maps.src_to_url.get(from_src)?;
-    let base = Path::new(from_url);
     let target = link.trim_start_matches('/');
+    let mut out = Vec::new();
+
+    // Candidate 1: treat rendered URL as directory (MkDocs pretty URLs)
     let mut joined = if link.starts_with('/') {
         PathBuf::from(target)
     } else {
-        let parent = base.parent().unwrap_or(Path::new(""));
-        parent.join(target)
+        Path::new(from_url).join(target)
     };
     joined = joined.with_extension("");
-    Some(normalise_url(&joined))
+    out.push(normalise_url(&joined));
+
+    // Candidate 2: treat rendered URL as file (use parent dir)
+    if let Some(parent) = Path::new(from_url).parent() {
+        let mut joined2 = if link.starts_with('/') {
+            PathBuf::from(target)
+        } else {
+            parent.join(target)
+        };
+        joined2 = joined2.with_extension("");
+        out.push(normalise_url(&joined2));
+    }
+
+    Some(out)
 }
 
 fn lookup_url(rendered: &str, url_to_src: &HashMap<String, PathBuf>) -> Option<PathBuf> {
@@ -313,6 +332,7 @@ fn analyse_links(
         #[cfg(test)]
         eprintln!("analysing {} links for {}", links.len(), src.display());
         for link in links {
+            let mut resolved = false;
             // 1) Try nav-based resolution
             if let Some(target) = resolve_link(src, &link, link_maps) {
                 if target.is_file() || files_set.contains(&target) {
@@ -324,19 +344,26 @@ fn analyse_links(
             }
 
             // 2) Try URL-derived filesystem guess under mkdocs_dir/docs
-            if let Some(rendered) = rendered_url_for_link(src, &link, link_maps) {
-                let fs_guess = mkdocs_dir
-                    .join("docs")
-                    .join(&rendered)
-                    .with_extension("md")
-                    .components()
-                    .collect::<PathBuf>();
-                if fs_guess.is_file() || files_set.contains(&fs_guess) {
-                    #[cfg(test)]
-                    eprintln!("resolved via fs guess: {} -> {}", link, fs_guess.display());
-                    referenced.insert(fs_guess);
-                    continue;
+            if let Some(rendered_list) = rendered_url_for_link(src, &link, link_maps) {
+                for rendered in rendered_list {
+                    let fs_guess = mkdocs_dir
+                        .join("docs")
+                        .join(&rendered)
+                        .with_extension("md")
+                        .components()
+                        .collect::<PathBuf>();
+                    if fs_guess.is_file() || files_set.contains(&fs_guess) {
+                        #[cfg(test)]
+                        eprintln!("resolved via fs guess: {} -> {}", link, fs_guess.display());
+                        referenced.insert(fs_guess);
+                        resolved = true;
+                        break;
+                    }
                 }
+            }
+
+            if resolved {
+                continue;
             }
 
             // 3) Try filesystem-relative resolution
@@ -350,12 +377,12 @@ fn analyse_links(
                     .collect::<PathBuf>()
             };
 
-        if fs_target.is_file() || files_set.contains(&fs_target) {
-            #[cfg(test)]
-            eprintln!("resolved via fs target: {} -> {}", link, fs_target.display());
-            referenced.insert(fs_target);
-            continue;
-        }
+            if fs_target.is_file() || files_set.contains(&fs_target) {
+                #[cfg(test)]
+                eprintln!("resolved via fs target: {} -> {}", link, fs_target.display());
+                referenced.insert(fs_target);
+                continue;
+            }
 
         // 4) Unresolved
         #[cfg(test)]

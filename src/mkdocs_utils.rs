@@ -61,7 +61,13 @@ pub fn audit(mkdocs_yaml: &Path, help_urls: &Path) -> Result<AuditResult, Box<dy
     let files_set: HashSet<PathBuf> = files.iter().cloned().collect();
     let mut ghost = orphans(&pages, &files); // markdown files in the file system not referenced by nav
 
-    let file_contents: Vec<(PathBuf, String)> = files
+    // For link analysis, read only nav-listed pages that actually exist to avoid scanning everything under parent
+    let pages_existing: Vec<PathBuf> = pages.iter().filter(|p| p.is_file()).cloned().collect();
+    let link_files_set: HashSet<PathBuf> = files_set
+        .union(&pages_existing.iter().cloned().collect())
+        .cloned()
+        .collect();
+    let file_contents: Vec<(PathBuf, String)> = pages_existing
         .iter()
         .map(|p| fs::read_to_string(p).map(|c| (p.clone(), c)))
         .collect::<io::Result<_>>()?;
@@ -74,7 +80,7 @@ pub fn audit(mkdocs_yaml: &Path, help_urls: &Path) -> Result<AuditResult, Box<dy
     ghost.retain(|x| !help_files.contains(x));
 
     let (referenced, broken_links) =
-        analyse_links(&file_contents, &files_set, parent, &link_maps)?;
+        analyse_links(&file_contents, &link_files_set, parent, &link_maps)?;
 
     ghost.retain(|p| !referenced.contains(p));
 

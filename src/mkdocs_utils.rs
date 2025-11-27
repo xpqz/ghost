@@ -27,6 +27,19 @@ pub struct AuditResult {
     pub nav_missing: Vec<PathBuf>,
     pub ghost: Vec<PathBuf>,
     pub help_missing: Vec<PathBuf>,
+    pub broken_links: Vec<BrokenLink>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct BrokenLink {
+    pub from: PathBuf,
+    pub link: String,
+}
+
+#[derive(Debug, Default)]
+pub struct LinkMaps {
+    pub url_to_src: HashMap<String, PathBuf>,
+    pub src_to_url: HashMap<PathBuf, String>,
 }
 
 pub fn audit(mkdocs_yaml: &Path, help_urls: &Path) -> Result<AuditResult, Box<dyn Error>> {
@@ -42,28 +55,34 @@ pub fn audit(mkdocs_yaml: &Path, help_urls: &Path) -> Result<AuditResult, Box<dy
     collect_pages(&config.nav, &mut pages, parent)?;
     let nav_missing = missing_files(&pages);
     let mut markdown_roots = Vec::new();
+    // parent dir MUST NOT BE INCLUDED in markdown_roots!
     markdown_roots.extend(include_roots(&config.nav, parent));
     let files = find_markdown(markdown_roots)?;
+    let files_set: HashSet<PathBuf> = files.iter().cloned().collect();
     let mut ghost = orphans(&pages, &files); // markdown files in the file system not referenced by nav
+
+    let file_contents: Vec<(PathBuf, String)> = files
+        .iter()
+        .map(|p| fs::read_to_string(p).map(|c| (p.clone(), c)))
+        .collect::<io::Result<_>>()?;
+
+    let link_maps = build_link_maps(&config.nav, parent)?;
 
     let help_files = extract_help_urls(help_urls, parent);
     let help_missing = missing_files(&help_files);
 
     ghost.retain(|x| !help_files.contains(x));
 
-    let links: Vec<String> = normalise_links(
-        files
-            .iter()
-            .map(|p| fs::read_to_string(p).map(|c| extract_links(&c)))
-            .collect::<io::Result<Vec<_>>>()?
-            .into_iter()
-            .flatten(),
-    );
+    let (referenced, broken_links) =
+        analyse_links(&file_contents, &files_set, parent, &link_maps)?;
+
+    ghost.retain(|p| !referenced.contains(p));
 
     Ok(AuditResult {
         nav_missing,
         ghost,
         help_missing,
+        broken_links,
     })
 }
 
@@ -133,6 +152,218 @@ where
             }
         })
         .collect()
+}
+
+// Complex. Map the "virtual" hierarchy as defined by the nav onto the file system so that
+// we can check links for validity.
+pub fn build_link_maps(nav: &[NavItem], mkdocs_dir: &Path) -> Result<LinkMaps, Box<dyn Error>> {
+    let mut maps = LinkMaps::default();
+    build_link_maps_inner(
+        nav,
+        mkdocs_dir,
+        mkdocs_dir,
+        Path::new(""),
+        &mut maps.url_to_src,
+        &mut maps.src_to_url,
+    )?;
+    Ok(maps)
+}
+
+fn build_link_maps_inner(
+    nav: &[NavItem],
+    mkdocs_dir: &Path,
+    site_root: &Path,
+    url_prefix: &Path,
+    url_to_src: &mut HashMap<String, PathBuf>,
+    src_to_url: &mut HashMap<PathBuf, String>,
+) -> Result<(), Box<dyn Error>> {
+    for item in nav {
+        match item {
+            NavItem::Page(map) => {
+                for path in map.values() {
+                    if let Some(include_path) = parse_include_target(path) {
+                        let include_file = mkdocs_dir.join(include_path);
+                        let include_contents = fs::read_to_string(&include_file)?;
+                        let include_config: MkDocsConfig = serde_yaml::from_str(&include_contents)?;
+                        let include_parent = include_file
+                            .parent()
+                            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "include has no parent"))?
+                            .components()
+                            .collect::<PathBuf>();
+                        let mut child_prefix = url_prefix.to_path_buf();
+                        if let Ok(rel) = include_parent.strip_prefix(site_root) {
+                            child_prefix = child_prefix.join(rel);
+                        }
+                        build_link_maps_inner(
+                            &include_config.nav,
+                            &include_parent,
+                            site_root,
+                            &child_prefix,
+                            url_to_src,
+                            src_to_url,
+                        )?;
+                    } else {
+                        insert_mapping(path, mkdocs_dir, url_prefix, url_to_src, src_to_url);
+                    }
+                }
+            }
+            NavItem::Section(map) => {
+                for children in map.values() {
+                    build_link_maps_inner(
+                        children,
+                        mkdocs_dir,
+                        site_root,
+                        url_prefix,
+                        url_to_src,
+                        src_to_url,
+                    )?;
+                }
+            }
+            NavItem::PlainPath(path) => {
+                insert_mapping(path, mkdocs_dir, url_prefix, url_to_src, src_to_url);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn insert_mapping(
+    nav_path: &str,
+    mkdocs_dir: &Path,
+    url_prefix: &Path,
+    url_to_src: &mut HashMap<String, PathBuf>,
+    src_to_url: &mut HashMap<PathBuf, String>,
+) {
+    let fs_path = mkdocs_dir
+        .join("docs")
+        .join(nav_path)
+        .components()
+        .collect::<PathBuf>();
+    let mut rendered = url_prefix.to_path_buf();
+    rendered.push(Path::new(nav_path));
+    let rendered = rendered.with_extension("");
+    let rendered = normalise_url(&rendered);
+    url_to_src.entry(rendered.clone()).or_insert(fs_path.clone());
+    src_to_url.entry(fs_path).or_insert(rendered);
+}
+
+fn normalise_url(path: &Path) -> String {
+    let mut parts = Vec::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                parts.pop();
+            }
+            _ => parts.push(comp.as_os_str().to_string_lossy().into_owned()),
+        }
+    }
+    parts.join("/")
+}
+
+pub fn resolve_link(from_src: &Path, link: &str, maps: &LinkMaps) -> Option<PathBuf> {
+    let rendered = rendered_url_for_link(from_src, link, maps)?;
+    lookup_url(&rendered, &maps.url_to_src)
+}
+
+fn rendered_url_for_link(from_src: &Path, link: &str, maps: &LinkMaps) -> Option<String> {
+    let from_url = maps.src_to_url.get(from_src)?;
+    let base = Path::new(from_url);
+    let target = link.trim_start_matches('/');
+    let mut joined = if link.starts_with('/') {
+        PathBuf::from(target)
+    } else {
+        let parent = base.parent().unwrap_or(Path::new(""));
+        parent.join(target)
+    };
+    joined = joined.with_extension("");
+    Some(normalise_url(&joined))
+}
+
+fn lookup_url(rendered: &str, url_to_src: &HashMap<String, PathBuf>) -> Option<PathBuf> {
+    if let Some(p) = url_to_src.get(rendered) {
+        return Some(p.clone());
+    }
+    let mut alt = rendered.trim_end_matches('/').to_string();
+    if let Some(p) = url_to_src.get(&alt) {
+        return Some(p.clone());
+    }
+    alt.push_str("/index");
+    url_to_src.get(&alt).cloned()
+}
+
+fn analyse_links(
+    files: &[(PathBuf, String)],
+    files_set: &HashSet<PathBuf>,
+    mkdocs_dir: &Path,
+    link_maps: &LinkMaps,
+) -> io::Result<(HashSet<PathBuf>, Vec<BrokenLink>)> {
+    let mut referenced = HashSet::new();
+    let mut broken_links = Vec::new();
+
+    for (src, content) in files {
+        let links = normalise_links(extract_links(content));
+        #[cfg(test)]
+        eprintln!("analysing {} links for {}", links.len(), src.display());
+        for link in links {
+            // 1) Try nav-based resolution
+            if let Some(target) = resolve_link(src, &link, link_maps) {
+                if target.is_file() || files_set.contains(&target) {
+                    #[cfg(test)]
+                    eprintln!("resolved via nav: {} -> {}", link, target.display());
+                    referenced.insert(target);
+                    continue;
+                }
+            }
+
+            // 2) Try URL-derived filesystem guess under mkdocs_dir/docs
+            if let Some(rendered) = rendered_url_for_link(src, &link, link_maps) {
+                let fs_guess = mkdocs_dir
+                    .join("docs")
+                    .join(&rendered)
+                    .with_extension("md")
+                    .components()
+                    .collect::<PathBuf>();
+                if fs_guess.is_file() || files_set.contains(&fs_guess) {
+                    #[cfg(test)]
+                    eprintln!("resolved via fs guess: {} -> {}", link, fs_guess.display());
+                    referenced.insert(fs_guess);
+                    continue;
+                }
+            }
+
+            // 3) Try filesystem-relative resolution
+            let fs_target = if link.starts_with('/') {
+                mkdocs_dir.join("docs").join(link.trim_start_matches('/'))
+            } else {
+                src.parent()
+                    .unwrap_or(mkdocs_dir)
+                    .join(&link)
+                    .components()
+                    .collect::<PathBuf>()
+            };
+
+        if fs_target.is_file() || files_set.contains(&fs_target) {
+            #[cfg(test)]
+            eprintln!("resolved via fs target: {} -> {}", link, fs_target.display());
+            referenced.insert(fs_target);
+            continue;
+        }
+
+        // 4) Unresolved
+        #[cfg(test)]
+        eprintln!("broken: {} -> {}", src.display(), link);
+        broken_links.push(BrokenLink {
+            from: src.clone(),
+            link: link.clone(),
+        });
+    }
+    }
+
+    #[cfg(test)]
+    eprintln!("returning broken_links len {}", broken_links.len());
+    Ok((referenced, broken_links))
 }
 
 pub fn collect_pages(
@@ -618,6 +849,138 @@ nav:
         let orphan_files = orphans(&nav, &files);
 
         assert!(orphan_files.is_empty());
+    }
+
+    #[test]
+    fn test_build_link_maps_with_include_and_resolution() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        let root_docs = root.join("docs");
+        fs::create_dir_all(root_docs.join("dir")).unwrap();
+        fs::write(root_docs.join("a.md"), "# A").unwrap();
+        fs::write(root_docs.join("dir").join("b.md"), "# B").unwrap();
+        fs::write(root.join("help_urls.h"), "").unwrap();
+
+        let inc_dir = root.join("release-notes");
+        fs::create_dir_all(inc_dir.join("docs")).unwrap();
+        fs::write(inc_dir.join("docs").join("child.md"), "# Child").unwrap();
+
+        let inc_mkdocs = r#"
+nav:
+  - Child: child.md
+"#;
+        fs::write(inc_dir.join("mkdocs.yml"), inc_mkdocs).unwrap();
+
+        let nav = vec![
+            NavItem::Page({
+                let mut m = HashMap::new();
+                m.insert("A".to_string(), "a.md".to_string());
+                m
+            }),
+            NavItem::Page({
+                let mut m = HashMap::new();
+                m.insert("B".to_string(), "dir/b.md".to_string());
+                m
+            }),
+            NavItem::Page({
+                let mut m = HashMap::new();
+                m.insert("Include".to_string(), "!include ./release-notes/mkdocs.yml".to_string());
+                m
+            }),
+        ];
+
+        let maps = build_link_maps(&nav, root).unwrap();
+        let keys: Vec<String> = maps.url_to_src.keys().cloned().collect();
+        assert!(
+            keys.contains(&"release-notes/child".to_string()),
+            "keys: {:?}",
+            keys
+        );
+        assert_eq!(
+            maps.url_to_src.get("a").unwrap(),
+            &root.join("docs").join("a.md")
+        );
+        assert_eq!(
+            maps.url_to_src.get("release-notes/child").unwrap(),
+            &inc_dir.join("docs").join("child.md")
+        );
+
+        let from_src = root_docs.join("dir").join("b.md");
+        let target = resolve_link(&from_src, "../a.md", &maps).unwrap();
+        assert_eq!(target, root_docs.join("a.md"));
+
+        let target2 = resolve_link(&from_src, "/release-notes/child.md", &maps).unwrap();
+        assert_eq!(target2, inc_dir.join("docs").join("child.md"));
+    }
+
+    #[test]
+    fn test_ghost_removed_when_linked() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        let docs = root.join("docs");
+        fs::create_dir_all(&docs).unwrap();
+        fs::write(docs.join("a.md"), "[Link](orphan)").unwrap();
+        fs::write(docs.join("orphan.md"), "# Orphan").unwrap();
+        fs::write(root.join("help_urls.h"), "").unwrap();
+
+        let mkdocs = r#"
+nav:
+  - A: a.md
+"#;
+        fs::write(root.join("mkdocs.yml"), mkdocs).unwrap();
+
+        let result = audit(&root.join("mkdocs.yml"), &root.join("help_urls.h")).unwrap();
+        assert!(!result.ghost.contains(&docs.join("orphan.md")));
+        assert!(result.broken_links.is_empty());
+    }
+
+    #[test]
+    fn test_broken_link_reported() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        let docs = root.join("docs");
+        fs::create_dir_all(&docs).unwrap();
+        fs::write(docs.join("a.md"), "[Missing](missing)").unwrap();
+        fs::write(root.join("help_urls.h"), "").unwrap();
+
+        let mkdocs = r#"
+nav:
+  - A: a.md
+"#;
+        fs::write(root.join("mkdocs.yml"), mkdocs).unwrap();
+
+        let extracted = extract_links(&fs::read_to_string(docs.join("a.md")).unwrap());
+        assert_eq!(extracted, vec!["missing"]);
+
+        let files = find_markdown(vec![root]).unwrap();
+        assert_eq!(files.len(), 1);
+
+        let links = normalise_links(extract_links(&fs::read_to_string(docs.join("a.md")).unwrap()));
+        assert_eq!(links, vec!["missing.md"]);
+
+        let files_set: HashSet<PathBuf> = files.iter().cloned().collect();
+        let file_contents: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|p| fs::read_to_string(p).map(|c| (p.clone(), c)))
+            .collect::<io::Result<_>>()
+            .unwrap();
+        let link_maps = build_link_maps(
+            &vec![NavItem::Page({
+                let mut m = HashMap::new();
+                m.insert("A".to_string(), "a.md".to_string());
+                m
+            })],
+            root,
+        )
+        .unwrap();
+        let (_refd, broken_direct) =
+            analyse_links(&file_contents, &files_set, root, &link_maps).unwrap();
+        assert_eq!(broken_direct.len(), 1, "{:?}", broken_direct);
+
+        let result = audit(&root.join("mkdocs.yml"), &root.join("help_urls.h")).unwrap();
+        assert_eq!(result.broken_links.len(), 1, "{:?}", result.broken_links);
+        assert_eq!(result.broken_links[0].from, docs.join("a.md"));
+        assert_eq!(result.broken_links[0].link, "missing.md");
     }
 
     #[test]

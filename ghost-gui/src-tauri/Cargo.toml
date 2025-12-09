@@ -1,0 +1,18 @@
+[package]
+name = "ghost-gui"
+version.workspace = true
+edition.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+ghost-lib.workspace = true
+serde.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde_json = "1"
+
+[lib]
+name = "ghost_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]

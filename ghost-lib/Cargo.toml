@@ -1,0 +1,15 @@
+[package]
+name = "ghost-lib"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+regex.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+walkdir.workspace = true
+pulldown-cmark.workspace = true
+scraper.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

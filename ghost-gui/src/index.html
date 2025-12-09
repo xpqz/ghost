@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ghost - MkDocs Auditor</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Ghost</h1>
+      <p class="subtitle">MkDocs Documentation Auditor</p>
+    </header>
+
+    <section class="file-inputs">
+      <div class="input-group">
+        <label for="mkdocs-path">mkdocs.yml</label>
+        <div class="file-row">
+          <input type="text" id="mkdocs-path" placeholder="Select mkdocs.yml file..." readonly>
+          <button id="browse-mkdocs" class="btn-secondary">Browse</button>
+        </div>
+      </div>
+
+      <div class="input-group">
+        <label for="help-urls-path">help_urls.h</label>
+        <div class="file-row">
+          <input type="text" id="help-urls-path" placeholder="Select help_urls.h file..." readonly>
+          <button id="browse-help-urls" class="btn-secondary">Browse</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="options">
+      <h2>Report Options</h2>
+      <div class="checkbox-grid">
+        <label class="checkbox-item">
+          <input type="checkbox" id="opt-nav-missing">
+          <span>Missing nav entries</span>
+        </label>
+        <label class="checkbox-item">
+          <input type="checkbox" id="opt-ghost">
+          <span>Ghost files (orphans)</span>
+        </label>
+        <label class="checkbox-item">
+          <input type="checkbox" id="opt-help-missing">
+          <span>Missing help URLs</span>
+        </label>
+        <label class="checkbox-item">
+          <input type="checkbox" id="opt-broken-links">
+          <span>Broken links</span>
+        </label>
+        <label class="checkbox-item">
+          <input type="checkbox" id="opt-missing-images">
+          <span>Missing images</span>
+        </label>
+        <label class="checkbox-item">
+          <input type="checkbox" id="opt-orphan-images">
+          <span>Orphan images</span>
+        </label>
+      </div>
+
+      <div class="option-row">
+        <label class="checkbox-item">
+          <input type="checkbox" id="opt-summary" checked>
+          <span>Summary only (counts, not individual items)</span>
+        </label>
+      </div>
+
+      <div class="input-group">
+        <label for="exclude">Exclude subsites (comma-separated)</label>
+        <input type="text" id="exclude" placeholder="e.g., object-reference,legacy-docs" value="object-reference">
+      </div>
+    </section>
+
+    <div class="actions">
+      <button id="run-audit" class="btn-primary">Run Audit</button>
+    </div>
+
+    <section class="results" id="results-section" style="display: none;">
+      <h2>Results</h2>
+      <div class="counts" id="counts"></div>
+      <pre id="output"></pre>
+    </section>
+  </div>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>

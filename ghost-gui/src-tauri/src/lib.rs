@@ -1,0 +1,307 @@
+use ghost_lib::{audit, AuditResult, BrokenImage, BrokenLink};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Deserialize)]
+pub struct AuditOptions {
+    pub mkdocs_yaml: String,
+    pub help_urls: String,
+    pub nav_missing: bool,
+    pub ghost: bool,
+    pub help_missing: bool,
+    pub broken_links: bool,
+    pub missing_images: bool,
+    pub orphan_images: bool,
+    pub summary: bool,
+    pub exclude: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuditOutput {
+    pub success: bool,
+    pub error: Option<String>,
+    pub output: String,
+    pub counts: AuditCounts,
+}
+
+#[derive(Debug, Serialize, Default)]
+pub struct AuditCounts {
+    pub nav_missing: usize,
+    pub ghost: usize,
+    pub help_missing: usize,
+    pub broken_links: usize,
+    pub missing_images: usize,
+    pub orphan_images: usize,
+    pub total: usize,
+}
+
+fn relative_path(p: &Path, root: Option<&Path>) -> String {
+    if let Some(r) = root {
+        p.strip_prefix(r)
+            .map(|rel| rel.display().to_string())
+            .unwrap_or_else(|_| p.display().to_string())
+    } else {
+        p.display().to_string()
+    }
+}
+
+fn is_excluded(p: &Path, root: Option<&Path>, excluded: &[&str]) -> bool {
+    if let Some(r) = root {
+        if let Ok(rel) = p.strip_prefix(r) {
+            if let Some(first) = rel.components().next() {
+                let subsite = first.as_os_str().to_string_lossy();
+                return excluded.iter().any(|&ex| ex == subsite);
+            }
+        }
+    }
+    false
+}
+
+fn format_result(
+    result: &AuditResult,
+    options: &AuditOptions,
+    monorepo_root: Option<&Path>,
+) -> (String, AuditCounts) {
+    let excluded: Vec<&str> = if options.exclude.is_empty() {
+        vec![]
+    } else {
+        options.exclude.split(',').map(|s| s.trim()).collect()
+    };
+
+    // Filter results
+    let nav_missing: Vec<&PathBuf> = result
+        .nav_missing
+        .iter()
+        .filter(|p| !is_excluded(p, monorepo_root, &excluded))
+        .collect();
+    let ghost: Vec<&PathBuf> = result
+        .ghost
+        .iter()
+        .filter(|p| !is_excluded(p, monorepo_root, &excluded))
+        .collect();
+    let help_missing: Vec<&PathBuf> = result
+        .help_missing
+        .iter()
+        .filter(|p| !is_excluded(p, monorepo_root, &excluded))
+        .collect();
+    let broken_links: Vec<&BrokenLink> = result
+        .broken_links
+        .iter()
+        .filter(|bl| !is_excluded(&bl.from, monorepo_root, &excluded))
+        .collect();
+    let missing_images: Vec<&BrokenImage> = result
+        .missing_images
+        .iter()
+        .filter(|bi| !is_excluded(&bi.from, monorepo_root, &excluded))
+        .collect();
+    let orphan_images: Vec<&PathBuf> = result
+        .orphan_images
+        .iter()
+        .filter(|p| !is_excluded(p, monorepo_root, &excluded))
+        .collect();
+
+    // Determine which reports to show
+    let show_all = !options.nav_missing
+        && !options.ghost
+        && !options.help_missing
+        && !options.broken_links
+        && !options.missing_images
+        && !options.orphan_images;
+
+    let show_nav_missing = show_all || options.nav_missing;
+    let show_ghost = show_all || options.ghost;
+    let show_help_missing = show_all || options.help_missing;
+    let show_broken_links = show_all || options.broken_links;
+    let show_missing_images = show_all || options.missing_images;
+    let show_orphan_images = show_all || options.orphan_images;
+
+    let mut output = String::new();
+    let mut counts = AuditCounts::default();
+
+    if show_nav_missing {
+        counts.nav_missing = nav_missing.len();
+        format_pathbuf_section(
+            &mut output,
+            "Missing nav entries",
+            &nav_missing,
+            options.summary,
+            monorepo_root,
+        );
+    }
+
+    if show_ghost {
+        counts.ghost = ghost.len();
+        format_pathbuf_section(
+            &mut output,
+            "Ghost files (orphans)",
+            &ghost,
+            options.summary,
+            monorepo_root,
+        );
+    }
+
+    if show_help_missing {
+        counts.help_missing = help_missing.len();
+        format_pathbuf_section(
+            &mut output,
+            "Missing help URLs",
+            &help_missing,
+            options.summary,
+            monorepo_root,
+        );
+    }
+
+    if show_broken_links {
+        counts.broken_links = broken_links.len();
+        format_broken_links_section(
+            &mut output,
+            "Broken links",
+            &broken_links,
+            options.summary,
+            monorepo_root,
+        );
+    }
+
+    if show_missing_images {
+        counts.missing_images = missing_images.len();
+        format_broken_images_section(
+            &mut output,
+            "Missing images",
+            &missing_images,
+            options.summary,
+            monorepo_root,
+        );
+    }
+
+    if show_orphan_images {
+        counts.orphan_images = orphan_images.len();
+        format_pathbuf_section(
+            &mut output,
+            "Orphan images",
+            &orphan_images,
+            options.summary,
+            monorepo_root,
+        );
+    }
+
+    counts.total = counts.nav_missing
+        + counts.ghost
+        + counts.help_missing
+        + counts.broken_links
+        + counts.missing_images
+        + counts.orphan_images;
+
+    if !options.summary {
+        output.push_str(&format!("\nTotal issues: {}\n", counts.total));
+    }
+
+    (output, counts)
+}
+
+fn format_pathbuf_section(
+    output: &mut String,
+    title: &str,
+    items: &[&PathBuf],
+    summary: bool,
+    monorepo_root: Option<&Path>,
+) {
+    if summary {
+        output.push_str(&format!("{}: {}\n", title, items.len()));
+    } else {
+        output.push_str(&format!("\n{}:\n", title));
+        if items.is_empty() {
+            output.push_str("  (none)\n");
+        } else {
+            for item in items {
+                output.push_str(&format!("  {}\n", relative_path(item, monorepo_root)));
+            }
+        }
+    }
+}
+
+fn format_broken_links_section(
+    output: &mut String,
+    title: &str,
+    items: &[&BrokenLink],
+    summary: bool,
+    monorepo_root: Option<&Path>,
+) {
+    if summary {
+        output.push_str(&format!("{}: {}\n", title, items.len()));
+    } else {
+        output.push_str(&format!("\n{}:\n", title));
+        if items.is_empty() {
+            output.push_str("  (none)\n");
+        } else {
+            for bl in items {
+                let marker = if bl.from_help_url { "[H] " } else { "" };
+                output.push_str(&format!(
+                    "  {}{} -> {}\n",
+                    marker,
+                    relative_path(&bl.from, monorepo_root),
+                    bl.link
+                ));
+            }
+        }
+    }
+}
+
+fn format_broken_images_section(
+    output: &mut String,
+    title: &str,
+    items: &[&BrokenImage],
+    summary: bool,
+    monorepo_root: Option<&Path>,
+) {
+    if summary {
+        output.push_str(&format!("{}: {}\n", title, items.len()));
+    } else {
+        output.push_str(&format!("\n{}:\n", title));
+        if items.is_empty() {
+            output.push_str("  (none)\n");
+        } else {
+            for bi in items {
+                output.push_str(&format!(
+                    "  {} -> {}\n",
+                    relative_path(&bi.from, monorepo_root),
+                    bi.image
+                ));
+            }
+        }
+    }
+}
+
+#[tauri::command]
+fn run_audit(options: AuditOptions) -> AuditOutput {
+    let mkdocs_path = PathBuf::from(&options.mkdocs_yaml);
+    let help_urls_path = PathBuf::from(&options.help_urls);
+
+    let monorepo_root = mkdocs_path.parent().map(|p| p.to_path_buf());
+
+    match audit(&mkdocs_path, &help_urls_path) {
+        Ok(result) => {
+            let (output, counts) = format_result(&result, &options, monorepo_root.as_deref());
+            AuditOutput {
+                success: true,
+                error: None,
+                output,
+                counts,
+            }
+        }
+        Err(e) => AuditOutput {
+            success: false,
+            error: Some(e.to_string()),
+            output: String::new(),
+            counts: AuditCounts::default(),
+        },
+    }
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![run_audit])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}

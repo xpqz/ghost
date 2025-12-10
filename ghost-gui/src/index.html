@@ -32,7 +32,6 @@
     </section>
 
     <section class="options">
-      <h2>Report Options</h2>
       <div class="checkbox-grid">
         <label class="checkbox-item">
           <input type="checkbox" id="opt-nav-missing">
@@ -67,18 +66,16 @@
         </label>
       </div>
 
-      <div class="input-group">
-        <label for="exclude">Exclude subsites (comma-separated)</label>
-        <input type="text" id="exclude" placeholder="e.g., object-reference,legacy-docs" value="object-reference">
+      <div class="options-footer">
+        <div class="input-group exclude-group">
+          <label for="exclude">Exclude subsites (comma-separated)</label>
+          <input type="text" id="exclude" placeholder="e.g., object-reference,legacy-docs" value="object-reference">
+        </div>
+        <button id="run-audit" class="btn-primary">Run Audit</button>
       </div>
     </section>
 
-    <div class="actions">
-      <button id="run-audit" class="btn-primary">Run Audit</button>
-    </div>
-
     <section class="results" id="results-section" style="display: none;">
-      <h2>Results</h2>
       <div class="counts" id="counts"></div>
       <pre id="output"></pre>
     </section>

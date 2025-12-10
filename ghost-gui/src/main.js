@@ -90,11 +90,15 @@ runAuditBtn.addEventListener('click', async () => {
     return;
   }
 
+  // Show spinner immediately
   runAuditBtn.disabled = true;
-  runAuditBtn.textContent = 'Running...';
+  runAuditBtn.innerHTML = '<span class="spinner"></span>Running...';
+
+  // Force a repaint before starting async work
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
   resultsSection.style.display = 'block';
   countsDiv.innerHTML = '';
-  outputPre.textContent = 'Running audit...';
+  outputPre.textContent = '';
 
   try {
     const result = await invoke('run_audit', {
@@ -124,7 +128,7 @@ runAuditBtn.addEventListener('click', async () => {
     outputPre.textContent = '';
   } finally {
     runAuditBtn.disabled = false;
-    runAuditBtn.textContent = 'Run Audit';
+    runAuditBtn.innerHTML = 'Run Audit';
   }
 });
 

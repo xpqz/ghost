@@ -11,7 +11,9 @@ ghost-lib.workspace = true
 serde.workspace = true
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+tauri-plugin-shell = "2"
 serde_json = "1"
+dirs = "5"
 
 [lib]
 name = "ghost_gui_lib"

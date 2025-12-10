@@ -4,12 +4,13 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Ghost - MkDocs Auditor</title>
+  <link rel="icon" type="image/png" href="favicon.png">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <div class="container">
     <header>
-      <h1>Ghost</h1>
+      <h1><img src="favicon.png" alt="" class="header-icon">Ghost</h1>
       <p class="subtitle">MkDocs Documentation Auditor</p>
     </header>
 
@@ -71,13 +72,30 @@
           <label for="exclude">Exclude subsites (comma-separated)</label>
           <input type="text" id="exclude" placeholder="e.g., object-reference,legacy-docs" value="object-reference">
         </div>
+        <div class="input-group version-group">
+          <label for="version">Version</label>
+          <input type="text" id="version" value="20.0">
+        </div>
         <button id="run-audit" class="btn-primary">Run Audit</button>
       </div>
     </section>
 
     <section class="results" id="results-section" style="display: none;">
-      <div class="counts" id="counts"></div>
-      <pre id="output"></pre>
+      <div class="results-header">
+        <div class="counts" id="counts"></div>
+        <div class="view-toggle">
+          <label class="toggle-item">
+            <input type="radio" name="view-mode" id="view-rich" checked>
+            <span>Rich</span>
+          </label>
+          <label class="toggle-item">
+            <input type="radio" name="view-mode" id="view-raw">
+            <span>Raw</span>
+          </label>
+        </div>
+      </div>
+      <div id="rich-output"></div>
+      <pre id="output" style="display: none;"></pre>
     </section>
   </div>
 

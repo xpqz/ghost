@@ -22,6 +22,30 @@ pub struct AuditOutput {
     pub error: Option<String>,
     pub output: String,
     pub counts: AuditCounts,
+    pub items: AuditItems,
+}
+
+#[derive(Debug, Serialize, Default)]
+pub struct AuditItems {
+    pub nav_missing: Vec<String>,
+    pub ghost: Vec<String>,
+    pub help_missing: Vec<String>,
+    pub broken_links: Vec<BrokenLinkItem>,
+    pub missing_images: Vec<BrokenImageItem>,
+    pub orphan_images: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BrokenLinkItem {
+    pub from: String,
+    pub link: String,
+    pub from_help_url: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BrokenImageItem {
+    pub from: String,
+    pub image: String,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -61,7 +85,7 @@ fn format_result(
     result: &AuditResult,
     options: &AuditOptions,
     monorepo_root: Option<&Path>,
-) -> (String, AuditCounts) {
+) -> (String, AuditCounts, AuditItems) {
     let excluded: Vec<&str> = if options.exclude.is_empty() {
         vec![]
     } else {
@@ -195,7 +219,59 @@ fn format_result(
         output.push_str(&format!("\nTotal issues: {}\n", counts.total));
     }
 
-    (output, counts)
+    // Build items for rich view
+    let mut items = AuditItems::default();
+
+    if show_nav_missing {
+        items.nav_missing = nav_missing
+            .iter()
+            .map(|p| relative_path(p, monorepo_root))
+            .collect();
+    }
+
+    if show_ghost {
+        items.ghost = ghost
+            .iter()
+            .map(|p| relative_path(p, monorepo_root))
+            .collect();
+    }
+
+    if show_help_missing {
+        items.help_missing = help_missing
+            .iter()
+            .map(|p| relative_path(p, monorepo_root))
+            .collect();
+    }
+
+    if show_broken_links {
+        items.broken_links = broken_links
+            .iter()
+            .map(|bl| BrokenLinkItem {
+                from: relative_path(&bl.from, monorepo_root),
+                link: bl.link.clone(),
+                from_help_url: bl.from_help_url,
+            })
+            .collect();
+    }
+
+    if show_missing_images {
+        items.missing_images = missing_images
+            .iter()
+            .map(|bi| BrokenImageItem {
+                from: relative_path(&bi.from, monorepo_root),
+                image: bi.image.clone(),
+            })
+            .collect();
+    }
+
+    if show_orphan_images {
+        items.orphan_images = orphan_images
+            .iter()
+            .map(|p| relative_path(p, monorepo_root))
+            .collect();
+    }
+
+    (output, counts, items)
 }
 
 fn format_pathbuf_section(
@@ -272,6 +348,19 @@ fn format_broken_images_section(
 }
 
 #[tauri::command]
+fn get_home_dir() -> Option<String> {
+    // Only return home dir on Unix systems where ~ is a recognized convention
+    #[cfg(unix)]
+    {
+        dirs::home_dir().map(|p| p.to_string_lossy().into_owned())
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+#[tauri::command]
 fn run_audit(options: AuditOptions) -> AuditOutput {
     let mkdocs_path = PathBuf::from(&options.mkdocs_yaml);
     let help_urls_path = PathBuf::from(&options.help_urls);
@@ -280,12 +369,13 @@ fn run_audit(options: AuditOptions) -> AuditOutput {
 
     match audit(&mkdocs_path, &help_urls_path) {
         Ok(result) => {
-            let (output, counts) = format_result(&result, &options, monorepo_root.as_deref());
+            let (output, counts, items) = format_result(&result, &options, monorepo_root.as_deref());
             AuditOutput {
                 success: true,
                 error: None,
                 output,
                 counts,
+                items,
             }
         }
         Err(e) => AuditOutput {
@@ -293,6 +383,7 @@ fn run_audit(options: AuditOptions) -> AuditOutput {
             error: Some(e.to_string()),
             output: String::new(),
             counts: AuditCounts::default(),
+            items: AuditItems::default(),
         },
     }
 }
@@ -301,7 +392,8 @@ fn run_audit(options: AuditOptions) -> AuditOutput {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![run_audit])
+        .plugin(tauri_plugin_shell::init())
+        .invoke_handler(tauri::generate_handler![run_audit, get_home_dir])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

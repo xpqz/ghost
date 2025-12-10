@@ -73,3 +73,17 @@ run MKDOCS HELP:
 # Build and install ghost to ~/.cargo/bin
 install:
     cargo install --path .
+
+# === GUI Commands ===
+
+# Run the GUI in development mode (hot reload)
+gui-dev:
+    cd ghost-gui && cargo tauri dev
+
+# Build the GUI for release (creates .app and .dmg on macOS)
+gui-build:
+    cd ghost-gui && cargo tauri build
+
+# Open the built DMG location in Finder (macOS)
+gui-open-bundle:
+    open target/release/bundle/dmg/

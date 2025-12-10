@@ -23,26 +23,78 @@ The binary will be at `target/release/ghost`.
 
 ### GUI (Tauri)
 
-The GUI provides a cross-platform desktop application with file pickers and checkboxes for all options.
+The GUI provides a cross-platform desktop application with file pickers and interactive results.
+
+**Features:**
+- File browser for selecting `mkdocs.yml` and `help_urls.h`
+- Checkbox selection for report types
+- Rich view with clickable links to open documentation pages in browser
+- Raw view for copying output to GitHub issues
+- Remembers file selections between sessions
+
+#### Pre-built binaries
+
+Download the latest release for your platform:
+
+| Platform | File | Notes |
+|----------|------|-------|
+| macOS (Apple Silicon) | `Ghost_x.x.x_aarch64.dmg` | Mount DMG, drag to Applications |
+| macOS (Intel) | `Ghost_x.x.x_x64.dmg` | Mount DMG, drag to Applications |
+| Windows | `Ghost_x.x.x_x64-setup.exe` | Run installer |
+
+**Note (macOS unsigned apps):** On first launch, macOS may show a security warning. Right-click the app and select "Open", or go to System Settings → Privacy & Security → "Open Anyway".
+
+#### Building from source
 
 Prerequisites:
 - Rust toolchain
-- Platform-specific dependencies for Tauri (see [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/))
+- Platform-specific dependencies for Tauri
+
+**Linux (Debian/Ubuntu):**
+```bash
+sudo apt update
+sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
+  libssl-dev libayatana-appindicator3-dev librsvg2-dev
+```
+
+**Linux (Fedora):**
+```bash
+sudo dnf install webkit2gtk4.1-devel openssl-devel curl wget file \
+  libappindicator-gtk3-devel librsvg2-devel
+sudo dnf group install "C Development Tools and Libraries"
+```
+
+**Linux (Arch):**
+```bash
+sudo pacman -S webkit2gtk-4.1 base-devel curl wget file openssl \
+  libappindicator-gtk3 librsvg
+```
+
+**macOS:** No additional dependencies (Xcode command line tools required).
+
+**Windows:** No additional dependencies (Visual Studio Build Tools required).
+
+See [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for full details.
 
 Build the release app:
 
 ```bash
-cd ghost-gui
-cargo tauri build
+just gui-build
+# Or directly:
+cd ghost-gui && cargo tauri build
 ```
 
-The bundled application will be in `ghost-gui/src-tauri/target/release/bundle/`.
+Output locations:
+- **macOS**: `target/release/bundle/macos/Ghost.app` and `target/release/bundle/dmg/Ghost_x.x.x_aarch64.dmg`
+- **Linux**: `target/release/bundle/deb/` (.deb) and `target/release/bundle/appimage/` (.AppImage)
+- **Windows**: `target/release/bundle/msi/` and `target/release/bundle/nsis/`
 
 For development with hot reload:
 
 ```bash
-cd ghost-gui
-cargo tauri dev
+just gui-dev
+# Or directly:
+cd ghost-gui && cargo tauri dev
 ```
 
 ## Usage

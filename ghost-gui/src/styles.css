@@ -26,6 +26,15 @@ header h1 {
   font-size: 1.5rem;
   color: #2563eb;
   margin-bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+}
+
+.header-icon {
+  width: 1.5rem;
+  height: 1.5rem;
 }
 
 .subtitle {
@@ -158,6 +167,15 @@ button {
   margin-bottom: 0;
 }
 
+.options-footer .version-group {
+  width: 4rem;
+  margin-bottom: 0;
+}
+
+.options-footer .version-group input {
+  width: 100%;
+}
+
 .options-footer button {
   padding: 0.4rem 1rem;
   font-size: 0.85rem;
@@ -168,24 +186,51 @@ button {
   background: #fff;
 }
 
+.results-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 0.5rem;
+}
+
+.view-toggle {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.toggle-item {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  cursor: pointer;
+  font-size: 0.75rem;
+  color: #666;
+}
+
+.toggle-item input[type="radio"] {
+  width: 12px;
+  height: 12px;
+  accent-color: #2563eb;
+}
+
 .counts {
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  margin-bottom: 0.5rem;
+  flex-wrap: nowrap;
+  gap: 0.35rem;
 }
 
 .count-item {
   background: #f0f0f0;
-  padding: 0.2rem 0.5rem;
+  padding: 0.15rem 0.35rem;
   border-radius: 3px;
   display: flex;
   align-items: center;
-  gap: 0.25rem;
+  gap: 0.15rem;
+  white-space: nowrap;
 }
 
 .count-item .number {
-  font-size: 0.85rem;
+  font-size: 0.75rem;
   font-weight: 600;
   color: #2563eb;
 }
@@ -195,8 +240,17 @@ button {
 }
 
 .count-item .label {
-  font-size: 0.7rem;
+  font-size: 0.65rem;
   color: #666;
+}
+
+.count-item.clickable {
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.count-item.clickable:hover {
+  background: #e0e0e0;
 }
 
 #output {
@@ -238,4 +292,65 @@ button {
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+#rich-output {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.issue-section {
+  margin-bottom: 0.75rem;
+}
+
+.issue-section h3 {
+  font-size: 0.8rem;
+  color: #555;
+  margin-bottom: 0.35rem;
+  font-weight: 600;
+}
+
+.issue-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.issue-item {
+  padding: 0.25rem 0;
+  font-size: 0.75rem;
+  border-bottom: 1px solid #eee;
+}
+
+.issue-item:last-child {
+  border-bottom: none;
+}
+
+.issue-link {
+  color: #2563eb;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.issue-link:hover {
+  text-decoration: underline;
+}
+
+.issue-arrow {
+  color: #999;
+  margin: 0 0.35rem;
+}
+
+.issue-target {
+  color: #dc2626;
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+}
+
+.help-url-marker {
+  background: #fef3c7;
+  color: #92400e;
+  font-size: 0.65rem;
+  padding: 0.1rem 0.25rem;
+  border-radius: 2px;
+  margin-right: 0.35rem;
 }

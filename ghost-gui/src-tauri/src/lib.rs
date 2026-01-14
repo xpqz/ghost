@@ -14,6 +14,7 @@ pub struct AuditOptions {
     pub missing_images: bool,
     pub orphan_images: bool,
     pub footnotes: bool,
+    pub has_images: bool,
     pub summary: bool,
     pub exclude: String,
 }
@@ -37,6 +38,7 @@ pub struct AuditItems {
     pub missing_images: Vec<BrokenImageItem>,
     pub orphan_images: Vec<String>,
     pub footnotes: Vec<String>,
+    pub has_images: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -87,6 +89,7 @@ pub struct AuditCounts {
     pub missing_images: usize,
     pub orphan_images: usize,
     pub footnotes: usize,
+    pub has_images: usize,
     pub total: usize,
 }
 
@@ -159,6 +162,11 @@ fn format_result(
         .iter()
         .filter(|p| !is_excluded(p, monorepo_root, &excluded))
         .collect();
+    let has_images: Vec<&PathBuf> = result
+        .pages_with_images
+        .iter()
+        .filter(|p| !is_excluded(p, monorepo_root, &excluded))
+        .collect();
 
     // Determine which reports to show
     let show_all = !options.nav_missing
@@ -167,7 +175,8 @@ fn format_result(
         && !options.broken_links
         && !options.missing_images
         && !options.orphan_images
-        && !options.footnotes;
+        && !options.footnotes
+        && !options.has_images;
 
     let show_nav_missing = show_all || options.nav_missing;
     let show_ghost = show_all || options.ghost;
@@ -176,6 +185,7 @@ fn format_result(
     let show_missing_images = show_all || options.missing_images;
     let show_orphan_images = show_all || options.orphan_images;
     let show_footnotes = options.footnotes;
+    let show_has_images = options.has_images;
 
     let mut output = String::new();
     let mut counts = AuditCounts::default();
@@ -257,6 +267,17 @@ fn format_result(
         );
     }
 
+    if show_has_images {
+        counts.has_images = has_images.len();
+        format_pathbuf_section(
+            &mut output,
+            "Pages with images",
+            &has_images,
+            options.summary,
+            monorepo_root,
+        );
+    }
+
     counts.total = counts.nav_missing
         + counts.ghost
         + counts.help_missing
@@ -322,6 +343,13 @@ fn format_result(
 
     if show_footnotes {
         items.footnotes = footnotes
+            .iter()
+            .map(|p| relative_path(p, monorepo_root))
+            .collect();
+    }
+
+    if show_has_images {
+        items.has_images = has_images
             .iter()
             .map(|p| relative_path(p, monorepo_root))
             .collect();

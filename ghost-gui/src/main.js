@@ -32,11 +32,12 @@ const optBrokenLinks = document.getElementById('opt-broken-links');
 const optMissingImages = document.getElementById('opt-missing-images');
 const optOrphanImages = document.getElementById('opt-orphan-images');
 const optFootnotes = document.getElementById('opt-footnotes');
+const optHasImages = document.getElementById('opt-has-images');
 const optSummary = document.getElementById('opt-summary');
 const excludeInput = document.getElementById('exclude');
 
 // Report type checkboxes (not including summary)
-const reportCheckboxes = [optNavMissing, optGhost, optHelpMissing, optBrokenLinks, optMissingImages, optOrphanImages, optFootnotes];
+const reportCheckboxes = [optNavMissing, optGhost, optHelpMissing, optBrokenLinks, optMissingImages, optOrphanImages, optFootnotes, optHasImages];
 
 // Checkbox logic: summary and report types are mutually exclusive
 optSummary.addEventListener('change', () => {
@@ -201,6 +202,7 @@ runAuditBtn.addEventListener('click', async () => {
         missing_images: optMissingImages.checked,
         orphan_images: optOrphanImages.checked,
         footnotes: optFootnotes.checked,
+        has_images: optHasImages.checked,
         summary: optSummary.checked,
         exclude: excludeInput.value.toLowerCase()
       }
@@ -237,6 +239,7 @@ function displayCounts(counts) {
     { key: 'missing_images', label: 'Missing Images', checkbox: optMissingImages },
     { key: 'orphan_images', label: 'Orphan Images', checkbox: optOrphanImages },
     { key: 'footnotes', label: 'Footnotes', checkbox: optFootnotes, isInfo: true },
+    { key: 'has_images', label: 'Has Images', checkbox: optHasImages, isInfo: true },
   ];
 
   // Determine which items to show based on checkbox state
@@ -335,6 +338,11 @@ function displayRichOutput(items, counts, version, summaryOnly) {
   // Footnotes - clickable to open in editor
   if (items.footnotes && items.footnotes.length > 0) {
     html += renderClickableFileSection('Pages with footnotes', items.footnotes, 'footnotes');
+  }
+
+  // Has images - clickable to open in editor
+  if (items.has_images && items.has_images.length > 0) {
+    html += renderClickableFileSection('Pages with images', items.has_images, 'has_images');
   }
 
   if (!html) {

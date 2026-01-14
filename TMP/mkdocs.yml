@@ -1,0 +1,5 @@
+nav:
+  - Primitive Operators:
+    - Operator Syntax: primitive-operators/operator-syntax.md
+    - Operators A-Z:
+      - Beside: primitive-operators/beside.md

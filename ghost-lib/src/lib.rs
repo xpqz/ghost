@@ -55,6 +55,7 @@ pub struct AuditResult {
     pub missing_images: Vec<BrokenImage>,
     pub orphan_images: Vec<PathBuf>,
     pub pages_with_footnotes: Vec<PathBuf>,
+    pub pages_with_images: Vec<PathBuf>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -214,6 +215,17 @@ pub fn audit(mkdocs_yaml: &Path, help_urls: &Path) -> Result<AuditResult, Box<dy
         .cloned()
         .collect();
 
+    // Find pages with images
+    let pages_with_images: Vec<PathBuf> = scanned
+        .iter()
+        .filter(|p| {
+            fs::read_to_string(p)
+                .map(|content| has_images(&content))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+
     Ok(AuditResult {
         nav_missing,
         ghost,
@@ -222,6 +234,7 @@ pub fn audit(mkdocs_yaml: &Path, help_urls: &Path) -> Result<AuditResult, Box<dy
         missing_images,
         orphan_images,
         pages_with_footnotes,
+        pages_with_images,
     })
 }
 
@@ -232,6 +245,11 @@ pub fn has_footnotes(markdown: &str) -> bool {
     // The identifier can be alphanumeric with hyphens/underscores
     let footnote_re = Regex::new(r"\[\^[^\]]+\]").unwrap();
     footnote_re.is_match(markdown)
+}
+
+/// Check if markdown content contains image references (markdown or HTML).
+pub fn has_images(markdown: &str) -> bool {
+    !extract_image_refs(markdown).is_empty()
 }
 
 pub fn extract_links(markdown: &str) -> Vec<String> {

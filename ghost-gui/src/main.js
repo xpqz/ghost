@@ -31,11 +31,12 @@ const optHelpMissing = document.getElementById('opt-help-missing');
 const optBrokenLinks = document.getElementById('opt-broken-links');
 const optMissingImages = document.getElementById('opt-missing-images');
 const optOrphanImages = document.getElementById('opt-orphan-images');
+const optFootnotes = document.getElementById('opt-footnotes');
 const optSummary = document.getElementById('opt-summary');
 const excludeInput = document.getElementById('exclude');
 
 // Report type checkboxes (not including summary)
-const reportCheckboxes = [optNavMissing, optGhost, optHelpMissing, optBrokenLinks, optMissingImages, optOrphanImages];
+const reportCheckboxes = [optNavMissing, optGhost, optHelpMissing, optBrokenLinks, optMissingImages, optOrphanImages, optFootnotes];
 
 // Checkbox logic: summary and report types are mutually exclusive
 optSummary.addEventListener('change', () => {
@@ -199,6 +200,7 @@ runAuditBtn.addEventListener('click', async () => {
         broken_links: optBrokenLinks.checked,
         missing_images: optMissingImages.checked,
         orphan_images: optOrphanImages.checked,
+        footnotes: optFootnotes.checked,
         summary: optSummary.checked,
         exclude: excludeInput.value.toLowerCase()
       }
@@ -234,16 +236,17 @@ function displayCounts(counts) {
     { key: 'broken_links', label: 'Broken Links', checkbox: optBrokenLinks },
     { key: 'missing_images', label: 'Missing Images', checkbox: optMissingImages },
     { key: 'orphan_images', label: 'Orphan Images', checkbox: optOrphanImages },
+    { key: 'footnotes', label: 'Footnotes', checkbox: optFootnotes, isInfo: true },
   ];
 
   // Determine which items to show based on checkbox state
-  // If no specific checkboxes are selected (summary mode or default), show all
+  // If no specific checkboxes are selected (summary mode or default), show all except info-only items
   const anySpecificSelected = reportCheckboxes.some(cb => cb.checked);
 
   const visibleItems = items.filter(item => {
     if (!anySpecificSelected) {
-      // Show all when no specific selection (summary mode)
-      return true;
+      // Show all issue types when no specific selection (summary mode), but not info-only items
+      return !item.isInfo;
     }
     // Show only selected checkboxes
     return item.checkbox.checked;
@@ -255,7 +258,7 @@ function displayCounts(counts) {
     .filter(item => counts[item.key] !== undefined)
     .map(item => {
       const value = counts[item.key];
-      const hasIssues = value > 0;
+      const hasIssues = !item.isInfo && value > 0;
       const clickableClass = isClickable ? 'clickable' : '';
       return `
         <div class="count-item ${hasIssues ? 'has-issues' : ''} ${clickableClass}" data-section="${item.key}">
@@ -329,6 +332,11 @@ function displayRichOutput(items, counts, version, summaryOnly) {
     html += renderPlainSection('Orphan images', items.orphan_images, 'orphan_images');
   }
 
+  // Footnotes - clickable to open in editor
+  if (items.footnotes && items.footnotes.length > 0) {
+    html += renderClickableFileSection('Pages with footnotes', items.footnotes, 'footnotes');
+  }
+
   if (!html) {
     html = '<div class="issue-section"><em>No issues found</em></div>';
   }
@@ -345,6 +353,17 @@ function displayRichOutput(items, counts, version, summaryOnly) {
       }
     });
   });
+
+  // Add click handlers for file links (open in editor)
+  richOutputDiv.querySelectorAll('.file-link').forEach(link => {
+    link.addEventListener('click', (e) => {
+      e.preventDefault();
+      const path = link.dataset.path;
+      if (path) {
+        openInEditor(path);
+      }
+    });
+  });
 }
 
 function renderPlainSection(title, paths, sectionKey) {
@@ -358,6 +377,35 @@ function renderPlainSection(title, paths, sectionKey) {
       <ul class="issue-list">${listItems}</ul>
     </div>
   `;
+}
+
+function renderClickableFileSection(title, paths, sectionKey) {
+  const listItems = paths.map(path => {
+    return `<li class="issue-item"><a class="file-link" data-path="${escapeHtml(path)}" title="Open in editor">${escapeHtml(path)}</a></li>`;
+  }).join('');
+
+  return `
+    <div class="issue-section" data-section="${sectionKey}">
+      <h3>${escapeHtml(title)} (${paths.length})</h3>
+      <ul class="issue-list">${listItems}</ul>
+    </div>
+  `;
+}
+
+// Open a file in the user's editor
+async function openInEditor(relativePath) {
+  const mkdocsPath = localStorage.getItem(STORAGE_MKDOCS);
+  if (!mkdocsPath) return;
+
+  // Get the parent directory of mkdocs.yml (monorepo root)
+  const basePath = mkdocsPath.substring(0, mkdocsPath.lastIndexOf('/'));
+  const fullPath = `${basePath}/${relativePath}`;
+
+  try {
+    await invoke('open_in_editor', { filePath: fullPath });
+  } catch (err) {
+    console.error('Failed to open in editor:', err);
+  }
 }
 
 function renderBrokenLinksSection(title, links, version, sectionKey) {

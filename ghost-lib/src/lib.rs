@@ -54,6 +54,7 @@ pub struct AuditResult {
     pub broken_links: Vec<BrokenLink>,
     pub missing_images: Vec<BrokenImage>,
     pub orphan_images: Vec<PathBuf>,
+    pub pages_with_footnotes: Vec<PathBuf>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -202,6 +203,17 @@ pub fn audit(mkdocs_yaml: &Path, help_urls: &Path) -> Result<AuditResult, Box<dy
         .cloned()
         .collect();
 
+    // Find pages with footnotes
+    let pages_with_footnotes: Vec<PathBuf> = scanned
+        .iter()
+        .filter(|p| {
+            fs::read_to_string(p)
+                .map(|content| has_footnotes(&content))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+
     Ok(AuditResult {
         nav_missing,
         ghost,
@@ -209,7 +221,17 @@ pub fn audit(mkdocs_yaml: &Path, help_urls: &Path) -> Result<AuditResult, Box<dy
         broken_links: all_broken_links,
         missing_images,
         orphan_images,
+        pages_with_footnotes,
     })
+}
+
+/// Check if markdown content contains footnote references or definitions.
+/// Footnotes use syntax like [^1] for references and [^1]: for definitions.
+pub fn has_footnotes(markdown: &str) -> bool {
+    // Match footnote references [^identifier] or definitions [^identifier]:
+    // The identifier can be alphanumeric with hyphens/underscores
+    let footnote_re = Regex::new(r"\[\^[^\]]+\]").unwrap();
+    footnote_re.is_match(markdown)
 }
 
 pub fn extract_links(markdown: &str) -> Vec<String> {

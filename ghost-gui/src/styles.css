@@ -345,6 +345,16 @@ button {
   text-decoration: underline;
 }
 
+.file-link {
+  color: #2563eb;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.file-link:hover {
+  text-decoration: underline;
+}
+
 .issue-arrow {
   color: #999;
   margin: 0 0.35rem;

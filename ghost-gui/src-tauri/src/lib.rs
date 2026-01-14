@@ -13,6 +13,7 @@ pub struct AuditOptions {
     pub broken_links: bool,
     pub missing_images: bool,
     pub orphan_images: bool,
+    pub footnotes: bool,
     pub summary: bool,
     pub exclude: String,
 }
@@ -35,6 +36,7 @@ pub struct AuditItems {
     pub broken_links: Vec<BrokenLinkItem>,
     pub missing_images: Vec<BrokenImageItem>,
     pub orphan_images: Vec<String>,
+    pub footnotes: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -84,6 +86,7 @@ pub struct AuditCounts {
     pub broken_links: usize,
     pub missing_images: usize,
     pub orphan_images: usize,
+    pub footnotes: usize,
     pub total: usize,
 }
 
@@ -151,6 +154,11 @@ fn format_result(
         .iter()
         .filter(|p| !is_excluded(p, monorepo_root, &excluded))
         .collect();
+    let footnotes: Vec<&PathBuf> = result
+        .pages_with_footnotes
+        .iter()
+        .filter(|p| !is_excluded(p, monorepo_root, &excluded))
+        .collect();
 
     // Determine which reports to show
     let show_all = !options.nav_missing
@@ -158,7 +166,8 @@ fn format_result(
         && !options.help_missing
         && !options.broken_links
         && !options.missing_images
-        && !options.orphan_images;
+        && !options.orphan_images
+        && !options.footnotes;
 
     let show_nav_missing = show_all || options.nav_missing;
     let show_ghost = show_all || options.ghost;
@@ -166,6 +175,7 @@ fn format_result(
     let show_broken_links = show_all || options.broken_links;
     let show_missing_images = show_all || options.missing_images;
     let show_orphan_images = show_all || options.orphan_images;
+    let show_footnotes = options.footnotes;
 
     let mut output = String::new();
     let mut counts = AuditCounts::default();
@@ -236,6 +246,17 @@ fn format_result(
         );
     }
 
+    if show_footnotes {
+        counts.footnotes = footnotes.len();
+        format_pathbuf_section(
+            &mut output,
+            "Pages with footnotes",
+            &footnotes,
+            options.summary,
+            monorepo_root,
+        );
+    }
+
     counts.total = counts.nav_missing
         + counts.ghost
         + counts.help_missing
@@ -294,6 +315,13 @@ fn format_result(
 
     if show_orphan_images {
         items.orphan_images = orphan_images
+            .iter()
+            .map(|p| relative_path(p, monorepo_root))
+            .collect();
+    }
+
+    if show_footnotes {
+        items.footnotes = footnotes
             .iter()
             .map(|p| relative_path(p, monorepo_root))
             .collect();
@@ -389,6 +417,33 @@ fn get_home_dir() -> Option<String> {
 }
 
 #[tauri::command]
+fn open_in_editor(file_path: String) -> Result<(), String> {
+    // Try to open with 'code' command (VS Code CLI)
+    let result = Command::new("code")
+        .arg(&file_path)
+        .spawn();
+
+    match result {
+        Ok(_) => Ok(()),
+        Err(_) => {
+            // Fallback: try macOS 'open' command
+            #[cfg(target_os = "macos")]
+            {
+                Command::new("open")
+                    .arg(&file_path)
+                    .spawn()
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Err(e.to_string())
+            }
+        }
+    }
+}
+
+#[tauri::command]
 fn run_audit(options: AuditOptions) -> AuditOutput {
     let mkdocs_path = PathBuf::from(&options.mkdocs_yaml);
     let help_urls_path = PathBuf::from(&options.help_urls);
@@ -424,7 +479,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![run_audit, get_home_dir])
+        .invoke_handler(tauri::generate_handler![run_audit, get_home_dir, open_in_editor])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

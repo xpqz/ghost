@@ -1,9 +1,5 @@
 const { invoke } = window.__TAURI__.core;
 const { open } = window.__TAURI__.dialog;
-const { open: shellOpen } = window.__TAURI__.shell;
-
-// Base URL for documentation site (version is appended dynamically)
-const DOCS_BASE = 'https://dyalog.github.io/documentation';
 
 // Storage keys
 const STORAGE_MKDOCS = 'ghost_mkdocs_path';
@@ -132,41 +128,6 @@ browseHelpUrlsBtn.addEventListener('click', async () => {
     console.error('Error opening file dialog:', err);
   }
 });
-
-// Convert filesystem path to documentation URL
-// e.g., "language-reference-guide/docs/primitive-operators/atop.md"
-//    -> "https://dyalog.github.io/documentation/20.0/language-reference-guide/primitive-operators/atop/"
-function pathToUrl(path, version) {
-  // Remove leading path components before subsite
-  let url = path;
-
-  // Remove /docs/ from path
-  url = url.replace(/\/docs\//, '/');
-
-  // Remove .md extension
-  url = url.replace(/\.md$/, '');
-
-  // Remove /index suffix (directory index pages)
-  url = url.replace(/\/index$/, '');
-
-  // Ensure trailing slash for clean URLs
-  if (!url.endsWith('/')) {
-    url += '/';
-  }
-
-  return `${DOCS_BASE}/${version}/${url}`;
-}
-
-// Open URL in default browser
-async function openUrl(url) {
-  try {
-    await shellOpen(url);
-  } catch (err) {
-    // Fallback: open in new window (won't work in Tauri but good for debugging)
-    console.error('Failed to open URL:', err);
-    window.open(url, '_blank');
-  }
-}
 
 // Run audit
 runAuditBtn.addEventListener('click', async () => {
@@ -325,12 +286,12 @@ function displayRichOutput(items, counts, version, summaryOnly) {
 
   // Broken links - these get clickable links to the source page
   if (items.broken_links && items.broken_links.length > 0) {
-    html += renderBrokenLinksSection('Broken links', items.broken_links, version, 'broken_links');
+    html += renderBrokenLinksSection('Broken links', items.broken_links, 'broken_links');
   }
 
   // Missing images
   if (items.missing_images && items.missing_images.length > 0) {
-    html += renderBrokenImagesSection('Missing images', items.missing_images, version, 'missing_images');
+    html += renderBrokenImagesSection('Missing images', items.missing_images, 'missing_images');
   }
 
   // Orphan images
@@ -358,17 +319,6 @@ function displayRichOutput(items, counts, version, summaryOnly) {
   }
 
   richOutputDiv.innerHTML = html;
-
-  // Add click handlers for links
-  richOutputDiv.querySelectorAll('.issue-link').forEach(link => {
-    link.addEventListener('click', (e) => {
-      e.preventDefault();
-      const url = link.dataset.url;
-      if (url) {
-        openUrl(url);
-      }
-    });
-  });
 
   // Add click handlers for file links (open in editor)
   richOutputDiv.querySelectorAll('.file-link').forEach(link => {
@@ -424,11 +374,10 @@ async function openInEditor(relativePath) {
   }
 }
 
-function renderBrokenLinksSection(title, links, version, sectionKey) {
+function renderBrokenLinksSection(title, links, sectionKey) {
   const listItems = links.map(bl => {
-    const url = pathToUrl(bl.from, version);
     const marker = bl.from_help_url ? '<span class="help-url-marker">H</span>' : '';
-    return `<li class="issue-item">${marker}<a class="issue-link" data-url="${escapeHtml(url)}" title="${escapeHtml(url)}">${escapeHtml(bl.from)}</a><span class="issue-arrow">-></span><span class="issue-target">${escapeHtml(bl.link)}</span></li>`;
+    return `<li class="issue-item">${marker}<a class="file-link" data-path="${escapeHtml(bl.from)}" title="Open in editor">${escapeHtml(bl.from)}</a><span class="issue-arrow">-></span><span class="issue-target">${escapeHtml(bl.link)}</span></li>`;
   }).join('');
 
   return `
@@ -439,10 +388,9 @@ function renderBrokenLinksSection(title, links, version, sectionKey) {
   `;
 }
 
-function renderBrokenImagesSection(title, images, version, sectionKey) {
+function renderBrokenImagesSection(title, images, sectionKey) {
   const listItems = images.map(bi => {
-    const url = pathToUrl(bi.from, version);
-    return `<li class="issue-item"><a class="issue-link" data-url="${escapeHtml(url)}" title="${escapeHtml(url)}">${escapeHtml(bi.from)}</a><span class="issue-arrow">-></span><span class="issue-target">${escapeHtml(bi.image)}</span></li>`;
+    return `<li class="issue-item"><a class="file-link" data-path="${escapeHtml(bi.from)}" title="Open in editor">${escapeHtml(bi.from)}</a><span class="issue-arrow">-></span><span class="issue-target">${escapeHtml(bi.image)}</span></li>`;
   }).join('');
 
   return `

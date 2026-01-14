@@ -1,7 +1,10 @@
-use ghost_lib::{audit, AuditResult, BrokenImage, BrokenLink};
+use ghost_lib::{audit, has_footnotes, has_images, has_links, AuditResult, BrokenImage, BrokenLink};
+use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use walkdir::WalkDir;
 
 #[derive(Debug, Deserialize)]
 pub struct AuditOptions {
@@ -60,6 +63,47 @@ pub struct BrokenImageItem {
 pub struct GitInfo {
     pub branch: String,
     pub hash_short: String,
+}
+
+// Search-related structs
+#[derive(Debug, Deserialize)]
+pub struct SearchOptions {
+    pub docs_root: String,
+    pub query: String,
+    pub is_regex: bool,
+    pub case_sensitive: bool,
+    pub context_lines: usize,
+    pub max_results: usize,
+    pub filter_footnotes: bool,
+    pub filter_has_images: bool,
+    pub filter_has_links: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SearchMatch {
+    pub line_number: usize,
+    pub line_content: String,
+    pub context_before: Vec<String>,
+    pub context_after: Vec<String>,
+    pub match_start: usize,
+    pub match_end: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SearchResult {
+    pub file_path: String,
+    pub matches: Vec<SearchMatch>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SearchOutput {
+    pub success: bool,
+    pub error: Option<String>,
+    pub results: Vec<SearchResult>,
+    pub total_matches: usize,
+    pub files_searched: usize,
+    pub truncated: bool,
+    pub git_info: Option<GitInfo>,
 }
 
 fn detect_git_info(dir: &Path) -> Option<GitInfo> {
@@ -500,6 +544,175 @@ fn open_in_editor(file_path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn search_docs(options: SearchOptions) -> SearchOutput {
+    let docs_path = PathBuf::from(&options.docs_root);
+    let git_info = detect_git_info(&docs_path);
+
+    if !docs_path.exists() || !docs_path.is_dir() {
+        return SearchOutput {
+            success: false,
+            error: Some(format!("Directory not found: {}", options.docs_root)),
+            results: vec![],
+            total_matches: 0,
+            files_searched: 0,
+            truncated: false,
+            git_info,
+        };
+    }
+
+    let has_query = !options.query.is_empty();
+    let has_filters =
+        options.filter_footnotes || options.filter_has_images || options.filter_has_links;
+
+    // Build the regex pattern if we have a query
+    let pattern = if has_query {
+        let pat = if options.is_regex {
+            match RegexBuilder::new(&options.query)
+                .case_insensitive(!options.case_sensitive)
+                .build()
+            {
+                Ok(re) => re,
+                Err(e) => {
+                    return SearchOutput {
+                        success: false,
+                        error: Some(format!("Invalid regex: {}", e)),
+                        results: vec![],
+                        total_matches: 0,
+                        files_searched: 0,
+                        truncated: false,
+                        git_info,
+                    };
+                }
+            }
+        } else {
+            // Escape regex special characters for literal search
+            let escaped = regex::escape(&options.query);
+            RegexBuilder::new(&escaped)
+                .case_insensitive(!options.case_sensitive)
+                .build()
+                .unwrap() // Safe: escaped pattern is always valid
+        };
+        Some(pat)
+    } else {
+        None
+    };
+
+    let mut results: Vec<SearchResult> = vec![];
+    let mut total_matches: usize = 0;
+    let mut files_searched: usize = 0;
+    let mut truncated = false;
+
+    // Walk through all markdown files
+    for entry in WalkDir::new(&docs_path)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_type().is_file()
+                && e.path().extension().and_then(|s| s.to_str()) == Some("md")
+        })
+    {
+        if total_matches >= options.max_results {
+            truncated = true;
+            break;
+        }
+
+        files_searched += 1;
+        let file_path = entry.path();
+
+        if let Ok(content) = fs::read_to_string(file_path) {
+            // Check filters first
+            if has_filters {
+                let passes_filter = (!options.filter_footnotes || has_footnotes(&content))
+                    && (!options.filter_has_images || has_images(&content))
+                    && (!options.filter_has_links || has_links(&content));
+
+                if !passes_filter {
+                    continue;
+                }
+            }
+
+            let relative = file_path
+                .strip_prefix(&docs_path)
+                .unwrap_or(file_path)
+                .to_string_lossy()
+                .to_string();
+
+            // If no query, just list the file (filter-only mode)
+            if pattern.is_none() {
+                results.push(SearchResult {
+                    file_path: relative,
+                    matches: vec![], // No matches, just listing files
+                });
+                total_matches += 1;
+                continue;
+            }
+
+            // Search for pattern matches
+            let pat = pattern.as_ref().unwrap();
+            let lines: Vec<&str> = content.lines().collect();
+            let mut file_matches: Vec<SearchMatch> = vec![];
+
+            for (idx, line) in lines.iter().enumerate() {
+                if total_matches >= options.max_results {
+                    truncated = true;
+                    break;
+                }
+
+                // Find all matches in this line
+                for mat in pat.find_iter(line) {
+                    if total_matches >= options.max_results {
+                        truncated = true;
+                        break;
+                    }
+
+                    // Collect context lines before
+                    let start_ctx = idx.saturating_sub(options.context_lines);
+                    let context_before: Vec<String> = lines[start_ctx..idx]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
+
+                    // Collect context lines after
+                    let end_ctx = (idx + 1 + options.context_lines).min(lines.len());
+                    let context_after: Vec<String> = lines[(idx + 1)..end_ctx]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
+
+                    file_matches.push(SearchMatch {
+                        line_number: idx + 1,
+                        line_content: line.to_string(),
+                        context_before,
+                        context_after,
+                        match_start: mat.start(),
+                        match_end: mat.end(),
+                    });
+
+                    total_matches += 1;
+                }
+            }
+
+            if !file_matches.is_empty() {
+                results.push(SearchResult {
+                    file_path: relative,
+                    matches: file_matches,
+                });
+            }
+        }
+    }
+
+    SearchOutput {
+        success: true,
+        error: None,
+        results,
+        total_matches,
+        files_searched,
+        truncated,
+        git_info,
+    }
+}
+
+#[tauri::command]
 fn run_audit(options: AuditOptions) -> AuditOutput {
     let mkdocs_path = PathBuf::from(&options.mkdocs_yaml);
     let help_urls_path = PathBuf::from(&options.help_urls);
@@ -535,7 +748,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![run_audit, get_home_dir, open_in_editor])
+        .invoke_handler(tauri::generate_handler![run_audit, get_home_dir, open_in_editor, search_docs])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

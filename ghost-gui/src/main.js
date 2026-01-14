@@ -17,7 +17,6 @@ const outputPre = document.getElementById('output');
 const richOutputDiv = document.getElementById('rich-output');
 const viewRichRadio = document.getElementById('view-rich');
 const viewRawRadio = document.getElementById('view-raw');
-const versionInput = document.getElementById('version');
 const gitInfoEl = document.getElementById('git-info');
 
 // Checkboxes
@@ -33,8 +32,21 @@ const optHasLinks = document.getElementById('opt-has-links');
 const optSummary = document.getElementById('opt-summary');
 const excludeInput = document.getElementById('exclude');
 
-// Report type checkboxes (not including summary)
-const reportCheckboxes = [optNavMissing, optGhost, optHelpMissing, optBrokenLinks, optMissingImages, optOrphanImages, optFootnotes, optHasImages, optHasLinks];
+// Tab elements
+const tabAudit = document.getElementById('tab-audit');
+const tabSearch = document.getElementById('tab-search');
+const auditControls = document.getElementById('audit-controls');
+const searchControls = document.getElementById('search-controls');
+
+// Search elements
+const searchQueryInput = document.getElementById('search-query');
+const runSearchBtn = document.getElementById('run-search');
+const searchRegexCheck = document.getElementById('search-regex');
+const searchCaseSensitiveCheck = document.getElementById('search-case-sensitive');
+const searchContextSelect = document.getElementById('search-context');
+
+// Report type checkboxes (not including summary) - audit tab only
+const reportCheckboxes = [optNavMissing, optGhost, optHelpMissing, optBrokenLinks, optMissingImages, optOrphanImages];
 
 // Checkbox logic: summary and report types are mutually exclusive
 optSummary.addEventListener('change', () => {
@@ -70,6 +82,23 @@ viewRawRadio.addEventListener('change', () => {
     richOutputDiv.style.display = 'none';
     outputPre.style.display = 'block';
   }
+});
+
+// Tab switching logic
+tabAudit.addEventListener('click', () => {
+  tabAudit.classList.add('active');
+  tabSearch.classList.remove('active');
+  auditControls.style.display = 'block';
+  searchControls.style.display = 'none';
+  resultsSection.style.display = 'none';
+});
+
+tabSearch.addEventListener('click', () => {
+  tabSearch.classList.add('active');
+  tabAudit.classList.remove('active');
+  auditControls.style.display = 'none';
+  searchControls.style.display = 'block';
+  resultsSection.style.display = 'none';
 });
 
 // Get home directory for path shortening
@@ -174,7 +203,7 @@ runAuditBtn.addEventListener('click', async () => {
     if (result.success) {
       displayCounts(result.counts);
       outputPre.textContent = result.output || '(no output)';
-      displayRichOutput(result.items, result.counts, versionInput.value, optSummary.checked);
+      displayRichOutput(result.items, result.counts, optSummary.checked);
       if (result.git_info) {
         gitInfoEl.textContent = `${result.git_info.branch} @ ${result.git_info.hash_short}`;
       }
@@ -201,23 +230,14 @@ function displayCounts(counts) {
     { key: 'broken_links', label: 'Broken Links', checkbox: optBrokenLinks },
     { key: 'missing_images', label: 'Missing Images', checkbox: optMissingImages },
     { key: 'orphan_images', label: 'Orphan Images', checkbox: optOrphanImages },
-    { key: 'footnotes', label: 'Footnotes', checkbox: optFootnotes, isInfo: true },
-    { key: 'has_images', label: 'Has Images', checkbox: optHasImages, isInfo: true },
-    { key: 'has_links', label: 'Has Links', checkbox: optHasLinks, isInfo: true },
   ];
 
   // Determine which items to show based on checkbox state
-  // If no specific checkboxes are selected (summary mode or default), show all except info-only items
   const anySpecificSelected = reportCheckboxes.some(cb => cb.checked);
 
-  const visibleItems = items.filter(item => {
-    if (!anySpecificSelected) {
-      // Show all issue types when no specific selection (summary mode), but not info-only items
-      return !item.isInfo;
-    }
-    // Show only selected checkboxes
-    return item.checkbox.checked;
-  });
+  const visibleItems = anySpecificSelected
+    ? items.filter(item => item.checkbox.checked)
+    : items; // Show all when in summary mode
 
   const isClickable = visibleItems.length > 1;
 
@@ -225,7 +245,7 @@ function displayCounts(counts) {
     .filter(item => counts[item.key] !== undefined)
     .map(item => {
       const value = counts[item.key];
-      const hasIssues = !item.isInfo && value > 0;
+      const hasIssues = value > 0;
       const clickableClass = isClickable ? 'clickable' : '';
       return `
         <div class="count-item ${hasIssues ? 'has-issues' : ''} ${clickableClass}" data-section="${item.key}">
@@ -260,7 +280,7 @@ function displayCounts(counts) {
   }
 }
 
-function displayRichOutput(items, counts, version, summaryOnly) {
+function displayRichOutput(items, counts, summaryOnly) {
   let html = '';
 
   // In summary mode, don't show detailed lists
@@ -297,21 +317,6 @@ function displayRichOutput(items, counts, version, summaryOnly) {
   // Orphan images
   if (items.orphan_images && items.orphan_images.length > 0) {
     html += renderPlainSection('Orphan images', items.orphan_images, 'orphan_images');
-  }
-
-  // Footnotes - clickable to open in editor
-  if (items.footnotes && items.footnotes.length > 0) {
-    html += renderClickableFileSection('Pages with footnotes', items.footnotes, 'footnotes');
-  }
-
-  // Has images - clickable to open in editor
-  if (items.has_images && items.has_images.length > 0) {
-    html += renderClickableFileSection('Pages with images', items.has_images, 'has_images');
-  }
-
-  // Has links - clickable to open in editor
-  if (items.has_links && items.has_links.length > 0) {
-    html += renderClickableFileSection('Pages with links', items.has_links, 'has_links');
   }
 
   if (!html) {
@@ -405,4 +410,201 @@ function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
+}
+
+// Helper to get docs root from mkdocs path
+function getDocsRoot() {
+  const mkdocsPath = localStorage.getItem(STORAGE_MKDOCS);
+  if (!mkdocsPath) return null;
+  return mkdocsPath.substring(0, mkdocsPath.lastIndexOf('/'));
+}
+
+// Run search
+runSearchBtn.addEventListener('click', async () => {
+  const query = searchQueryInput.value.trim();
+  const hasFilters = optFootnotes.checked || optHasImages.checked || optHasLinks.checked;
+
+  if (!query && !hasFilters) {
+    alert('Please enter a search term or select a filter');
+    return;
+  }
+
+  const docsRoot = getDocsRoot();
+  if (!docsRoot) {
+    alert('Please select an mkdocs.yml file first');
+    return;
+  }
+
+  // Show spinner
+  runSearchBtn.disabled = true;
+  runSearchBtn.innerHTML = '<span class="spinner"></span>Searching...';
+
+  // Show results section and clear previous results
+  resultsSection.style.display = 'block';
+  countsDiv.innerHTML = '';
+  outputPre.textContent = '';
+  richOutputDiv.innerHTML = '';
+  gitInfoEl.textContent = '';
+
+  try {
+    const result = await invoke('search_docs', {
+      options: {
+        docs_root: docsRoot,
+        query: query,
+        is_regex: searchRegexCheck.checked,
+        case_sensitive: searchCaseSensitiveCheck.checked,
+        context_lines: parseInt(searchContextSelect.value, 10),
+        max_results: 500,
+        filter_footnotes: optFootnotes.checked,
+        filter_has_images: optHasImages.checked,
+        filter_has_links: optHasLinks.checked
+      }
+    });
+
+    displaySearchResults(result);
+  } catch (err) {
+    richOutputDiv.innerHTML = `<div class="search-error">Error: ${err}</div>`;
+  } finally {
+    runSearchBtn.disabled = false;
+    runSearchBtn.innerHTML = 'Search';
+  }
+});
+
+// Allow Enter key to trigger search
+searchQueryInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    runSearchBtn.click();
+  }
+});
+
+function displaySearchResults(result) {
+  if (!result.success) {
+    richOutputDiv.innerHTML = `<div class="search-error">${escapeHtml(result.error)}</div>`;
+    return;
+  }
+
+  // Display git info
+  if (result.git_info) {
+    gitInfoEl.textContent = `${result.git_info.branch} @ ${result.git_info.hash_short}`;
+  }
+
+  // Summary in counts area
+  const truncatedNote = result.truncated ? ' (results truncated)' : '';
+  const summaryClass = result.truncated ? 'search-summary truncated' : 'search-summary';
+  // Check if this is filter-only (no query, just filters)
+  const isFilterOnlyMode = result.results.length > 0 && result.results[0].matches.length === 0;
+  const summaryText = isFilterOnlyMode
+    ? `Found ${result.results.length} files (${result.files_searched} files searched)${truncatedNote}`
+    : `Found ${result.total_matches} matches in ${result.results.length} files (${result.files_searched} files searched)${truncatedNote}`;
+  countsDiv.innerHTML = `<div class="${summaryClass}">${summaryText}</div>`;
+
+  if (result.results.length === 0) {
+    richOutputDiv.innerHTML = '<em>No matches found</em>';
+    return;
+  }
+
+  // Check if this is filter-only mode (no matches, just file list)
+  const isFilterOnly = result.results.length > 0 && result.results[0].matches.length === 0;
+
+  // Render results grouped by file
+  let html = '';
+  for (const fileResult of result.results) {
+    if (isFilterOnly) {
+      // Simple file list for filter-only mode
+      html += `
+        <div class="search-file-item">
+          <a class="file-link" data-path="${escapeHtml(fileResult.file_path)}" title="Click to open in editor">${escapeHtml(fileResult.file_path)}</a>
+        </div>
+      `;
+    } else {
+      html += `
+        <div class="search-file-group">
+          <div class="search-file-header" data-path="${escapeHtml(fileResult.file_path)}" title="Click to open in editor">
+            ${escapeHtml(fileResult.file_path)}
+            <span class="match-count">(${fileResult.matches.length} match${fileResult.matches.length !== 1 ? 'es' : ''})</span>
+          </div>
+          <div class="search-file-matches">
+      `;
+
+      for (const match of fileResult.matches) {
+        html += renderSearchMatch(match, fileResult.file_path);
+      }
+
+      html += '</div></div>';
+    }
+  }
+
+  richOutputDiv.innerHTML = html;
+
+  // Add click handlers for file headers (search with matches)
+  richOutputDiv.querySelectorAll('.search-file-header').forEach(header => {
+    header.addEventListener('click', () => {
+      openInEditor(header.dataset.path);
+    });
+  });
+
+  // Add click handlers for match items
+  richOutputDiv.querySelectorAll('.search-match-item').forEach(item => {
+    item.addEventListener('click', () => {
+      const path = item.dataset.path;
+      const line = item.dataset.line;
+      openInEditorAtLine(path, line);
+    });
+  });
+
+  // Add click handlers for file links (filter-only mode)
+  richOutputDiv.querySelectorAll('.search-file-item .file-link').forEach(link => {
+    link.addEventListener('click', (e) => {
+      e.preventDefault();
+      openInEditor(link.dataset.path);
+    });
+  });
+}
+
+function renderSearchMatch(match, filePath) {
+  let html = `<div class="search-match-item" data-path="${escapeHtml(filePath)}" data-line="${match.line_number}">`;
+
+  // Context before
+  const startLineNum = match.line_number - match.context_before.length;
+  for (let i = 0; i < match.context_before.length; i++) {
+    const lineNum = startLineNum + i;
+    html += `<div class="search-context-line"><span class="line-number">${lineNum}</span>${escapeHtml(match.context_before[i])}</div>`;
+  }
+
+  // Matching line with highlight
+  const before = match.line_content.substring(0, match.match_start);
+  const matched = match.line_content.substring(match.match_start, match.match_end);
+  const after = match.line_content.substring(match.match_end);
+
+  html += `<div class="search-match-line"><span class="line-number">${match.line_number}</span>${escapeHtml(before)}<span class="highlight">${escapeHtml(matched)}</span>${escapeHtml(after)}</div>`;
+
+  // Context after
+  for (let i = 0; i < match.context_after.length; i++) {
+    const lineNum = match.line_number + i + 1;
+    html += `<div class="search-context-line"><span class="line-number">${lineNum}</span>${escapeHtml(match.context_after[i])}</div>`;
+  }
+
+  html += '</div>';
+  return html;
+}
+
+// Open file in editor at specific line
+async function openInEditorAtLine(relativePath, lineNumber) {
+  const mkdocsPath = localStorage.getItem(STORAGE_MKDOCS);
+  if (!mkdocsPath) return;
+
+  const basePath = mkdocsPath.substring(0, mkdocsPath.lastIndexOf('/'));
+  const fullPath = `${basePath}/${relativePath}`;
+
+  try {
+    // VS Code supports opening at line with path:line syntax
+    await invoke('open_in_editor', { filePath: `${fullPath}:${lineNumber}` });
+  } catch (err) {
+    // Fallback: try without line number
+    try {
+      await invoke('open_in_editor', { filePath: fullPath });
+    } catch (err2) {
+      console.error('Failed to open in editor:', err2);
+    }
+  }
 }

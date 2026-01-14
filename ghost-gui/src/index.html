@@ -33,62 +33,93 @@
     </section>
 
     <section class="options">
-      <div class="checkbox-grid">
-        <label class="checkbox-item">
-          <input type="checkbox" id="opt-nav-missing">
-          <span>Missing nav entries</span>
-        </label>
-        <label class="checkbox-item">
-          <input type="checkbox" id="opt-ghost">
-          <span>Ghost files (orphans)</span>
-        </label>
-        <label class="checkbox-item">
-          <input type="checkbox" id="opt-help-missing">
-          <span>Missing help URLs</span>
-        </label>
-        <label class="checkbox-item">
-          <input type="checkbox" id="opt-broken-links">
-          <span>Broken links</span>
-        </label>
-        <label class="checkbox-item">
-          <input type="checkbox" id="opt-missing-images">
-          <span>Missing images</span>
-        </label>
-        <label class="checkbox-item">
-          <input type="checkbox" id="opt-orphan-images">
-          <span>Orphan images</span>
-        </label>
-        <label class="checkbox-item">
-          <input type="checkbox" id="opt-footnotes">
-          <span>Footnotes</span>
-        </label>
-        <label class="checkbox-item">
-          <input type="checkbox" id="opt-has-images">
-          <span>Has images</span>
-        </label>
-        <label class="checkbox-item">
-          <input type="checkbox" id="opt-has-links">
-          <span>Has links</span>
-        </label>
+      <div class="tabs">
+        <button class="tab active" id="tab-audit">Audit</button>
+        <button class="tab" id="tab-search">Search</button>
       </div>
 
-      <div class="option-row">
-        <label class="checkbox-item">
-          <input type="checkbox" id="opt-summary" checked>
-          <span>Summary only (counts, not individual items)</span>
-        </label>
+      <div id="audit-controls" class="tab-content">
+        <div class="checkbox-grid">
+          <label class="checkbox-item">
+            <input type="checkbox" id="opt-nav-missing">
+            <span>Missing nav entries</span>
+          </label>
+          <label class="checkbox-item">
+            <input type="checkbox" id="opt-ghost">
+            <span>Ghost files (orphans)</span>
+          </label>
+          <label class="checkbox-item">
+            <input type="checkbox" id="opt-help-missing">
+            <span>Missing help URLs</span>
+          </label>
+          <label class="checkbox-item">
+            <input type="checkbox" id="opt-broken-links">
+            <span>Broken links</span>
+          </label>
+          <label class="checkbox-item">
+            <input type="checkbox" id="opt-missing-images">
+            <span>Missing images</span>
+          </label>
+          <label class="checkbox-item">
+            <input type="checkbox" id="opt-orphan-images">
+            <span>Orphan images</span>
+          </label>
+        </div>
+
+        <div class="option-row">
+          <label class="checkbox-item">
+            <input type="checkbox" id="opt-summary" checked>
+            <span>Summary only (counts, not individual items)</span>
+          </label>
+        </div>
+
+        <div class="options-footer">
+          <div class="input-group exclude-group">
+            <label for="exclude">Exclude subsites (comma-separated)</label>
+            <input type="text" id="exclude" placeholder="e.g., object-reference,legacy-docs" value="object-reference">
+          </div>
+          <button id="run-audit" class="btn-primary">Run Audit</button>
+        </div>
       </div>
 
-      <div class="options-footer">
-        <div class="input-group exclude-group">
-          <label for="exclude">Exclude subsites (comma-separated)</label>
-          <input type="text" id="exclude" placeholder="e.g., object-reference,legacy-docs" value="object-reference">
+      <div id="search-controls" class="tab-content" style="display: none;">
+        <div class="search-row">
+          <input type="text" id="search-query" placeholder="Search in markdown files...">
         </div>
-        <div class="input-group version-group">
-          <label for="version">Version</label>
-          <input type="text" id="version" value="20.0">
+        <div class="search-options">
+          <label class="checkbox-item">
+            <input type="checkbox" id="search-regex">
+            <span>Regex</span>
+          </label>
+          <label class="checkbox-item">
+            <input type="checkbox" id="search-case-sensitive">
+            <span>Case sensitive</span>
+          </label>
+          <label class="context-select">
+            <span>Context:</span>
+            <select id="search-context">
+              <option value="0">0</option>
+              <option value="1">1</option>
+              <option value="2" selected>2</option>
+              <option value="3">3</option>
+            </select>
+          </label>
         </div>
-        <button id="run-audit" class="btn-primary">Run Audit</button>
+        <div class="search-filters">
+          <label class="checkbox-item">
+            <input type="checkbox" id="opt-footnotes">
+            <span>Has footnotes</span>
+          </label>
+          <label class="checkbox-item">
+            <input type="checkbox" id="opt-has-images">
+            <span>Has images</span>
+          </label>
+          <label class="checkbox-item">
+            <input type="checkbox" id="opt-has-links">
+            <span>Has links</span>
+          </label>
+          <button id="run-search" class="btn-primary">Search</button>
+        </div>
       </div>
     </section>
 

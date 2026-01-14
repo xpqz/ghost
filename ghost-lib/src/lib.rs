@@ -56,6 +56,7 @@ pub struct AuditResult {
     pub orphan_images: Vec<PathBuf>,
     pub pages_with_footnotes: Vec<PathBuf>,
     pub pages_with_images: Vec<PathBuf>,
+    pub pages_with_links: Vec<PathBuf>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -226,6 +227,17 @@ pub fn audit(mkdocs_yaml: &Path, help_urls: &Path) -> Result<AuditResult, Box<dy
         .cloned()
         .collect();
 
+    // Find pages with links
+    let pages_with_links: Vec<PathBuf> = scanned
+        .iter()
+        .filter(|p| {
+            fs::read_to_string(p)
+                .map(|content| has_links(&content))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+
     Ok(AuditResult {
         nav_missing,
         ghost,
@@ -235,6 +247,7 @@ pub fn audit(mkdocs_yaml: &Path, help_urls: &Path) -> Result<AuditResult, Box<dy
         orphan_images,
         pages_with_footnotes,
         pages_with_images,
+        pages_with_links,
     })
 }
 
@@ -250,6 +263,11 @@ pub fn has_footnotes(markdown: &str) -> bool {
 /// Check if markdown content contains image references (markdown or HTML).
 pub fn has_images(markdown: &str) -> bool {
     !extract_image_refs(markdown).is_empty()
+}
+
+/// Check if markdown content contains links (markdown or HTML).
+pub fn has_links(markdown: &str) -> bool {
+    !extract_links(markdown).is_empty()
 }
 
 pub fn extract_links(markdown: &str) -> Vec<String> {

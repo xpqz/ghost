@@ -22,6 +22,7 @@ const richOutputDiv = document.getElementById('rich-output');
 const viewRichRadio = document.getElementById('view-rich');
 const viewRawRadio = document.getElementById('view-raw');
 const versionInput = document.getElementById('version');
+const gitInfoEl = document.getElementById('git-info');
 
 // Checkboxes
 const optNavMissing = document.getElementById('opt-nav-missing');
@@ -185,6 +186,7 @@ runAuditBtn.addEventListener('click', async () => {
   countsDiv.innerHTML = '';
   outputPre.textContent = '';
   richOutputDiv.innerHTML = '';
+  gitInfoEl.textContent = '';
 
   try {
     const result = await invoke('run_audit', {
@@ -206,6 +208,9 @@ runAuditBtn.addEventListener('click', async () => {
       displayCounts(result.counts);
       outputPre.textContent = result.output || '(no output)';
       displayRichOutput(result.items, result.counts, versionInput.value, optSummary.checked);
+      if (result.git_info) {
+        gitInfoEl.textContent = `${result.git_info.branch} @ ${result.git_info.hash_short}`;
+      }
     } else {
       countsDiv.innerHTML = `<div class="error">Error: ${result.error}</div>`;
       outputPre.textContent = '';

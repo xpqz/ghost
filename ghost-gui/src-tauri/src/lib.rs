@@ -1,6 +1,7 @@
 use ghost_lib::{audit, AuditResult, BrokenImage, BrokenLink};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[derive(Debug, Deserialize)]
 pub struct AuditOptions {
@@ -23,6 +24,7 @@ pub struct AuditOutput {
     pub output: String,
     pub counts: AuditCounts,
     pub items: AuditItems,
+    pub git_info: Option<GitInfo>,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -46,6 +48,32 @@ pub struct BrokenLinkItem {
 pub struct BrokenImageItem {
     pub from: String,
     pub image: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct GitInfo {
+    pub branch: String,
+    pub hash_short: String,
+}
+
+fn detect_git_info(dir: &Path) -> Option<GitInfo> {
+    let branch = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())?;
+
+    let hash_short = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())?;
+
+    Some(GitInfo { branch, hash_short })
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -366,6 +394,7 @@ fn run_audit(options: AuditOptions) -> AuditOutput {
     let help_urls_path = PathBuf::from(&options.help_urls);
 
     let monorepo_root = mkdocs_path.parent().map(|p| p.to_path_buf());
+    let git_info = monorepo_root.as_deref().and_then(detect_git_info);
 
     match audit(&mkdocs_path, &help_urls_path) {
         Ok(result) => {
@@ -376,6 +405,7 @@ fn run_audit(options: AuditOptions) -> AuditOutput {
                 output,
                 counts,
                 items,
+                git_info,
             }
         }
         Err(e) => AuditOutput {
@@ -384,6 +414,7 @@ fn run_audit(options: AuditOptions) -> AuditOutput {
             output: String::new(),
             counts: AuditCounts::default(),
             items: AuditItems::default(),
+            git_info,
         },
     }
 }

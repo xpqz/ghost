@@ -42,7 +42,11 @@ Download the latest release for your platform:
 | macOS (Intel) | `Ghost_x.x.x_x64.dmg` | Mount DMG, drag to Applications |
 | Windows | `Ghost_x.x.x_x64-setup.exe` | Run installer |
 
-**Note (macOS unsigned apps):** On first launch, macOS may show a security warning. Right-click the app and select "Open", or go to System Settings → Privacy & Security → "Open Anyway".
+**Note (macOS unsigned apps):** The app is not signed/notarized, so macOS Gatekeeper may report it as "damaged". To fix this, run:
+```bash
+xattr -cr /Applications/Ghost.app
+```
+Alternatively, right-click the app and select "Open", or go to System Settings → Privacy & Security → "Open Anyway".
 
 #### Building from source
 

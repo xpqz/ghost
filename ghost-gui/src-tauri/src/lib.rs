@@ -535,9 +535,17 @@ fn open_in_editor(file_path: String) -> Result<(), String> {
                     .map(|_| ())
                     .map_err(|e| e.to_string())
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_os = "windows")]
             {
-                Err(e.to_string())
+                Command::new("cmd")
+                    .args(["/c", "start", "", &file_path])
+                    .spawn()
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            {
+                Err("No fallback editor available".to_string())
             }
         }
     }

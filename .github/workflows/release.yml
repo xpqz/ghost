@@ -111,6 +111,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Update version in tauri.conf.json
+        shell: bash
+        run: |
+          sed -i.bak 's/"version": "[^"]*"/"version": "${{ needs.create-release.outputs.version }}"/' ghost-gui/src-tauri/tauri.conf.json
+          rm -f ghost-gui/src-tauri/tauri.conf.json.bak
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:

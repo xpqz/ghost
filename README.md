@@ -46,7 +46,6 @@ Download the latest release for your platform:
 ```bash
 xattr -cr /Applications/Ghost.app
 ```
-Alternatively, right-click the app and select "Open", or go to System Settings → Privacy & Security → "Open Anyway".
 
 #### Building from source
 

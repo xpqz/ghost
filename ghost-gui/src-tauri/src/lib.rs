@@ -68,7 +68,7 @@ pub struct GitInfo {
 // Search-related structs
 #[derive(Debug, Deserialize)]
 pub struct SearchOptions {
-    pub docs_root: String,
+    pub mkdocs_yaml: String,
     pub query: String,
     pub is_regex: bool,
     pub case_sensitive: bool,
@@ -516,29 +516,81 @@ fn get_home_dir() -> Option<String> {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn find_vscode_windows() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+
+    // Check common VS Code installation locations on Windows
+    let candidates: Vec<PathBuf> = vec![
+        // User install (most common for fresh installs)
+        dirs::data_local_dir()
+            .map(|d| d.join("Programs").join("Microsoft VS Code").join("bin").join("code.cmd")),
+        dirs::data_local_dir()
+            .map(|d| d.join("Programs").join("Microsoft VS Code").join("Code.exe")),
+        // System-wide install
+        Some(PathBuf::from(r"C:\Program Files\Microsoft VS Code\bin\code.cmd")),
+        Some(PathBuf::from(r"C:\Program Files\Microsoft VS Code\Code.exe")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    candidates.into_iter().find(|p| p.exists())
+}
+
 #[tauri::command]
-fn open_in_editor(file_path: String) -> Result<(), String> {
-    // Try to open with 'code' command (VS Code CLI)
+fn open_in_editor(
+    mkdocs_yaml: String,
+    relative_path: String,
+    line_number: Option<usize>,
+) -> Result<(), String> {
+    let mkdocs_path = PathBuf::from(&mkdocs_yaml);
+    let base = mkdocs_path
+        .parent()
+        .ok_or("Invalid mkdocs.yml path")?;
+    let full_path = base.join(&relative_path);
+    let file_arg = match line_number {
+        Some(n) => format!("{}:{}", full_path.display(), n),
+        None => full_path.display().to_string(),
+    };
+
+    // Try to open with 'code' command (VS Code CLI, works if in PATH)
     let result = Command::new("code")
-        .arg(&file_path)
+        .arg(&file_arg)
         .spawn();
 
     match result {
         Ok(_) => Ok(()),
         Err(_) => {
-            // Fallback: try macOS 'open' command
-            #[cfg(target_os = "macos")]
+            #[cfg(target_os = "windows")]
             {
-                Command::new("open")
-                    .arg(&file_path)
+                // Try to find VS Code at known installation paths
+                if let Some(vscode_path) = find_vscode_windows() {
+                    let res = if vscode_path.extension().and_then(|e| e.to_str()) == Some("cmd") {
+                        Command::new("cmd")
+                            .args(["/c", &vscode_path.to_string_lossy(), &file_arg])
+                            .spawn()
+                    } else {
+                        Command::new(&vscode_path)
+                            .arg(&file_arg)
+                            .spawn()
+                    };
+                    match res {
+                        Ok(_) => return Ok(()),
+                        Err(_) => {} // fall through to generic fallback
+                    }
+                }
+                // Final fallback: open with system default
+                Command::new("cmd")
+                    .args(["/c", "start", "", &file_arg])
                     .spawn()
                     .map(|_| ())
                     .map_err(|e| e.to_string())
             }
-            #[cfg(target_os = "windows")]
+            #[cfg(target_os = "macos")]
             {
-                Command::new("cmd")
-                    .args(["/c", "start", "", &file_path])
+                Command::new("open")
+                    .arg(&file_arg)
                     .spawn()
                     .map(|_| ())
                     .map_err(|e| e.to_string())
@@ -553,13 +605,27 @@ fn open_in_editor(file_path: String) -> Result<(), String> {
 
 #[tauri::command]
 fn search_docs(options: SearchOptions) -> SearchOutput {
-    let docs_path = PathBuf::from(&options.docs_root);
+    let mkdocs_path = PathBuf::from(&options.mkdocs_yaml);
+    let docs_path = match mkdocs_path.parent() {
+        Some(p) => p.to_path_buf(),
+        None => {
+            return SearchOutput {
+                success: false,
+                error: Some("Invalid mkdocs.yml path".to_string()),
+                results: vec![],
+                total_matches: 0,
+                files_searched: 0,
+                truncated: false,
+                git_info: None,
+            };
+        }
+    };
     let git_info = detect_git_info(&docs_path);
 
     if !docs_path.exists() || !docs_path.is_dir() {
         return SearchOutput {
             success: false,
-            error: Some(format!("Directory not found: {}", options.docs_root)),
+            error: Some(format!("Directory not found: {}", docs_path.display())),
             results: vec![],
             total_matches: 0,
             files_searched: 0,

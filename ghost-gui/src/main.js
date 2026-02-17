@@ -365,15 +365,11 @@ function renderClickableFileSection(title, paths, sectionKey) {
 
 // Open a file in the user's editor
 async function openInEditor(relativePath) {
-  const mkdocsPath = localStorage.getItem(STORAGE_MKDOCS);
-  if (!mkdocsPath) return;
-
-  // Get the parent directory of mkdocs.yml (monorepo root)
-  const basePath = mkdocsPath.substring(0, mkdocsPath.lastIndexOf('/'));
-  const fullPath = `${basePath}/${relativePath}`;
+  const mkdocsYaml = localStorage.getItem(STORAGE_MKDOCS);
+  if (!mkdocsYaml) return;
 
   try {
-    await invoke('open_in_editor', { filePath: fullPath });
+    await invoke('open_in_editor', { mkdocsYaml, relativePath });
   } catch (err) {
     console.error('Failed to open in editor:', err);
   }
@@ -412,12 +408,6 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-// Helper to get docs root from mkdocs path
-function getDocsRoot() {
-  const mkdocsPath = localStorage.getItem(STORAGE_MKDOCS);
-  if (!mkdocsPath) return null;
-  return mkdocsPath.substring(0, mkdocsPath.lastIndexOf('/'));
-}
 
 // Run search
 runSearchBtn.addEventListener('click', async () => {
@@ -429,8 +419,8 @@ runSearchBtn.addEventListener('click', async () => {
     return;
   }
 
-  const docsRoot = getDocsRoot();
-  if (!docsRoot) {
+  const mkdocsYaml = localStorage.getItem(STORAGE_MKDOCS);
+  if (!mkdocsYaml) {
     alert('Please select an mkdocs.yml file first');
     return;
   }
@@ -449,7 +439,7 @@ runSearchBtn.addEventListener('click', async () => {
   try {
     const result = await invoke('search_docs', {
       options: {
-        docs_root: docsRoot,
+        mkdocs_yaml: mkdocsYaml,
         query: query,
         is_regex: searchRegexCheck.checked,
         case_sensitive: searchCaseSensitiveCheck.checked,
@@ -590,19 +580,15 @@ function renderSearchMatch(match, filePath) {
 
 // Open file in editor at specific line
 async function openInEditorAtLine(relativePath, lineNumber) {
-  const mkdocsPath = localStorage.getItem(STORAGE_MKDOCS);
-  if (!mkdocsPath) return;
-
-  const basePath = mkdocsPath.substring(0, mkdocsPath.lastIndexOf('/'));
-  const fullPath = `${basePath}/${relativePath}`;
+  const mkdocsYaml = localStorage.getItem(STORAGE_MKDOCS);
+  if (!mkdocsYaml) return;
 
   try {
-    // VS Code supports opening at line with path:line syntax
-    await invoke('open_in_editor', { filePath: `${fullPath}:${lineNumber}` });
+    await invoke('open_in_editor', { mkdocsYaml, relativePath, lineNumber });
   } catch (err) {
     // Fallback: try without line number
     try {
-      await invoke('open_in_editor', { filePath: fullPath });
+      await invoke('open_in_editor', { mkdocsYaml, relativePath });
     } catch (err2) {
       console.error('Failed to open in editor:', err2);
     }

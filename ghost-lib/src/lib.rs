@@ -194,9 +194,11 @@ pub fn audit(mkdocs_yaml: &Path, help_urls: &Path) -> Result<AuditResult, Box<dy
         })
         .collect();
 
-    // Analyse image references in all scanned markdown files
+    // Analyse image references in ALL markdown files on disk (not just
+    // nav-reachable ones) so that images used by orphaned pages are still
+    // recognised as referenced.
     let (missing_images, referenced_images) =
-        analyse_image_refs(&scanned, &css_files, &all_images, &include_dirs)?;
+        analyse_image_refs(&files_set, &css_files, &all_images, &include_dirs)?;
 
     // Find orphan images (images not referenced anywhere)
     let orphan_images: Vec<PathBuf> = all_images
@@ -298,20 +300,20 @@ pub fn extract_links(markdown: &str) -> Vec<String> {
 /// Extract image references from markdown content.
 /// Handles both markdown syntax ![alt](path) and HTML <img src="path">
 pub fn extract_image_refs(markdown: &str) -> Vec<String> {
-    let mut images = Vec::new();
+    let mut images = HashSet::new();
     let parser = Parser::new(markdown);
     let img_selector = Selector::parse("img[src]").unwrap();
 
     for event in parser {
         match event {
             Event::Start(Tag::Image { dest_url, .. }) => {
-                images.push(dest_url.into_string());
+                images.insert(dest_url.into_string());
             }
             Event::Html(html) | Event::InlineHtml(html) => {
                 let fragment = Html::parse_fragment(&html);
                 for el in fragment.select(&img_selector) {
                     if let Some(src) = el.value().attr("src") {
-                        images.push(src.to_string());
+                        images.insert(src.to_string());
                     }
                 }
             }
@@ -319,7 +321,17 @@ pub fn extract_image_refs(markdown: &str) -> Vec<String> {
         }
     }
 
-    images
+    // Regex fallback: pulldown_cmark can misparse markdown image syntax as
+    // code/text when raw HTML blocks precede fenced code blocks that contain
+    // blank lines.  A direct regex scan catches what the AST walk misses.
+    let md_img_re = Regex::new(r"!\[[^\]]*\]\(([^)]+)\)").unwrap();
+    for cap in md_img_re.captures_iter(markdown) {
+        if let Some(m) = cap.get(1) {
+            images.insert(m.as_str().to_string());
+        }
+    }
+
+    images.into_iter().collect()
 }
 
 /// Extract image references from CSS content.
@@ -2128,5 +2140,20 @@ nav:
             "propertyapplies/accelerator.md should not be an orphan"
         );
         assert!(result.broken_links.is_empty(), "{:?}", result.broken_links);
+    }
+
+    #[test]
+    fn test_extract_image_after_html_heading() {
+        // Reproduces bug: pulldown_cmark may swallow markdown image syntax
+        // that follows raw HTML blocks.
+        let md = "<h2 class=\"example\">Example</h2>\n\
+```apl\n\
+\n\
+      \u{2395}USING\u{2190}'System'\n\
+```\n\
+\n\
+![](img/status-window.png)\n";
+        let refs = extract_image_refs(md);
+        assert_eq!(refs, vec!["img/status-window.png"], "image ref after HTML heading should be extracted");
     }
 }

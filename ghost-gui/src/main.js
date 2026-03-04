@@ -69,11 +69,15 @@ reportCheckboxes.forEach(cb => {
   });
 });
 
+// Copy button
+const copyRawBtn = document.getElementById('copy-raw');
+
 // View toggle logic
 viewRichRadio.addEventListener('change', () => {
   if (viewRichRadio.checked) {
     richOutputDiv.style.display = 'block';
     outputPre.style.display = 'none';
+    copyRawBtn.style.display = 'none';
   }
 });
 
@@ -81,6 +85,17 @@ viewRawRadio.addEventListener('change', () => {
   if (viewRawRadio.checked) {
     richOutputDiv.style.display = 'none';
     outputPre.style.display = 'block';
+    copyRawBtn.style.display = 'inline-block';
+  }
+});
+
+copyRawBtn.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(outputPre.textContent);
+    copyRawBtn.textContent = 'Copied!';
+    setTimeout(() => { copyRawBtn.textContent = 'Copy'; }, 1500);
+  } catch (err) {
+    console.error('Copy failed:', err);
   }
 });
 
@@ -204,9 +219,7 @@ runAuditBtn.addEventListener('click', async () => {
       displayCounts(result.counts);
       outputPre.textContent = result.output || '(no output)';
       displayRichOutput(result.items, result.counts, optSummary.checked);
-      if (result.git_info) {
-        gitInfoEl.textContent = `${result.git_info.branch} @ ${result.git_info.hash_short}`;
-      }
+      displayGitInfo(result.git_info);
     } else {
       countsDiv.innerHTML = `<div class="error">Error: ${result.error}</div>`;
       outputPre.textContent = '';
@@ -402,6 +415,13 @@ function renderBrokenImagesSection(title, images, sectionKey) {
   `;
 }
 
+function displayGitInfo(gitInfo) {
+  if (gitInfo) {
+    gitInfoEl.textContent = `${gitInfo.branch} @ ${gitInfo.hash_short}`;
+    gitInfoEl.classList.toggle('git-info-warn', gitInfo.branch !== 'main');
+  }
+}
+
 function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = text;
@@ -473,10 +493,7 @@ function displaySearchResults(result) {
     return;
   }
 
-  // Display git info
-  if (result.git_info) {
-    gitInfoEl.textContent = `${result.git_info.branch} @ ${result.git_info.hash_short}`;
-  }
+  displayGitInfo(result.git_info);
 
   // Summary in counts area
   const truncatedNote = result.truncated ? ' (results truncated)' : '';

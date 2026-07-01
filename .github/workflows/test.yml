@@ -11,7 +11,12 @@ env:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
 
     steps:
       - uses: actions/checkout@v4
@@ -19,7 +24,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry
+      - name: Cache cargo
         uses: actions/cache@v4
         with:
           path: |
@@ -28,11 +33,15 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      # Scope fmt/lint/test to the portable crates. The Tauri GUI
+      # (ghost-gui/src-tauri) needs per-OS system WebView deps (webkit2gtk on
+      # Linux etc.) and carries no tests; it is compiled and bundled by
+      # release.yml on macOS + Windows instead.
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo fmt -p ghost-lib -p ghost-cli --check
 
       - name: Run clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy -p ghost-lib -p ghost-cli -- -D warnings
 
       - name: Run tests
-        run: cargo test
+        run: cargo test -p ghost-lib -p ghost-cli

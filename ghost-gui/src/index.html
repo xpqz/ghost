@@ -80,6 +80,18 @@
           </div>
           <button id="run-audit" class="btn-primary">Run Audit</button>
         </div>
+
+        <details class="diagnostics">
+          <summary>Diagnostics</summary>
+          <div class="diagnostics-body">
+            <div class="input-group trace-group">
+              <label for="trace-path">Trace file (path or suffix)</label>
+              <input type="text" id="trace-path" placeholder="e.g. system-functions/system-functions-by-category.md">
+            </div>
+            <button id="save-trace" class="btn-secondary" style="display: none;">Save processing log…</button>
+          </div>
+          <p class="diagnostics-hint">Run the audit with a file named here to capture a blow-by-blow processing log, then save it to send for troubleshooting.</p>
+        </details>
       </div>
 
       <div id="search-controls" class="tab-content" style="display: none;">

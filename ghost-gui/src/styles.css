@@ -19,7 +19,9 @@ body {
 .container {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  /* 100vh (not height:100%) so the column has a definite height without relying
+     on the html/body percentage chain, which WKWebView resolves unreliably. */
+  height: 100vh;
   padding: 0.75rem;
 }
 
@@ -188,12 +190,46 @@ button {
   white-space: nowrap;
 }
 
+/* Diagnostics (processing trace) */
+.diagnostics {
+  margin-top: 0.6rem;
+  border-top: 1px solid #eee;
+  padding-top: 0.5rem;
+}
+
+.diagnostics summary {
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: #555;
+  user-select: none;
+}
+
+.diagnostics-body {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.diagnostics-body .trace-group {
+  flex: 1;
+  margin-bottom: 0;
+}
+
+.diagnostics-hint {
+  font-size: 0.7rem;
+  color: #888;
+  margin: 0.35rem 0 0;
+}
+
 .results {
   background: #fff;
   flex: 1;
-  display: flex;
-  flex-direction: column;
   min-height: 0;
+  /* Scroll the results section directly (single-level flex child of .container).
+     WKWebView doesn't reliably scroll a nested flex-column child, so the scroll
+     lives here rather than on #rich-output/#output. */
+  overflow-y: auto;
 }
 
 .results-header {
@@ -201,8 +237,33 @@ button {
   flex-wrap: wrap;
   justify-content: space-between;
   align-items: flex-start;
-  margin-bottom: 0.5rem;
   gap: 0.5rem;
+  /* Keep the counts + Rich/Raw toggle visible while the list scrolls under it. */
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #fff;
+  padding-bottom: 0.5rem;
+  margin-bottom: 0;
+}
+
+/* Always-visible scrollbar. WKWebView (macOS) uses auto-hiding overlay scrollbars,
+   so without this the results pane scrolls but shows no scrollbar. Styling the
+   pseudo-elements switches WebKit to a persistent, styled scrollbar. */
+.results::-webkit-scrollbar {
+  width: 12px;
+}
+.results::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border-radius: 6px;
+}
+.results::-webkit-scrollbar-thumb {
+  background: #bdbdbd;
+  border-radius: 6px;
+  border: 3px solid #f1f1f1;
+}
+.results::-webkit-scrollbar-thumb:hover {
+  background: #9e9e9e;
 }
 
 .git-info {
@@ -293,8 +354,6 @@ button {
   overflow-x: auto;
   white-space: pre-wrap;
   word-break: break-all;
-  flex: 1;
-  overflow-y: auto;
 }
 
 .error {
@@ -323,10 +382,7 @@ button {
   to { transform: rotate(360deg); }
 }
 
-#rich-output {
-  flex: 1;
-  overflow-y: auto;
-}
+/* #rich-output and #output flow naturally inside the scrolling .results container. */
 
 .issue-section {
   margin-bottom: 0.75rem;
@@ -382,6 +438,13 @@ button {
   padding: 0.1rem 0.25rem;
   border-radius: 2px;
   margin-right: 0.35rem;
+}
+
+/* The verbatim HELP_URL(...) line shown for help-sourced broken links. */
+.help-url-line {
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+  font-size: 0.72rem;
+  color: #444;
 }
 
 /* Tabs */

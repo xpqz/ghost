@@ -1,3 +1,9 @@
+# Give ghost its own Cargo target dir so it doesn't share (and lock-contend on) the
+# Space2 `target-shared` used by nars/skalpel. `justfile_directory()` is dynamic, so this
+# is portable (and CI, which calls cargo directly rather than via just, is unaffected).
+# `export` here overrides any inherited CARGO_TARGET_DIR (e.g. the ~/.zshenv helper).
+export CARGO_TARGET_DIR := justfile_directory() / "target-shared"
+
 # List all available recipes
 default:
     @just --list

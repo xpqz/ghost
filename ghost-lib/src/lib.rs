@@ -236,7 +236,7 @@ pub fn audit_traced(
             .push(href.clone());
     }
     for refs in help_refs.values_mut() {
-        refs.sort_by(|a, b| a.line.cmp(&b.line));
+        refs.sort_by_key(|r| r.line);
         refs.dedup();
     }
 
@@ -415,6 +415,15 @@ pub fn audit_traced(
     ))
 }
 
+/// Render `p` relative to `base` using forward slashes, so trace output is identical and
+/// portable across platforms (Windows `Path::display` would emit backslashes).
+fn fwd_rel(p: &Path, base: &Path) -> String {
+    p.strip_prefix(base)
+        .unwrap_or(p)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
 /// Assemble the human-readable, forward-ready trace text from the collected per-file
 /// events plus the file's role in the audit (discovery, reachability, analysis).
 #[allow(clippy::too_many_arguments)]
@@ -468,7 +477,7 @@ fn render_trace(
         }
 
         for f in matches {
-            let rel = f.strip_prefix(mkdocs_dir).unwrap_or(f).display();
+            let rel = fwd_rel(f, mkdocs_dir);
             let _ = writeln!(out, "FILE {rel}");
             let _ = writeln!(out, "  exists on disk : {}", f.is_file());
 
@@ -1146,13 +1155,9 @@ fn analyse_links(
     let mut referenced = HashSet::new();
     let mut broken_links = Vec::new();
 
-    // Render a resolved target relative to the monorepo root for readable trace output.
-    let rel = |p: &Path| -> String {
-        p.strip_prefix(mkdocs_dir)
-            .unwrap_or(p)
-            .display()
-            .to_string()
-    };
+    // Render a resolved target relative to the monorepo root (forward slashes) for
+    // readable, portable trace output.
+    let rel = |p: &Path| -> String { fwd_rel(p, mkdocs_dir) };
 
     for (src, content) in files {
         let src_help_refs = help_refs.get(src).cloned().unwrap_or_default();
@@ -1719,18 +1724,17 @@ fn expand_url(raw: &str, macros: &HashMap<String, String>) -> String {
 fn inject_docs(path: &str) -> String {
     // Inject /docs/ after the first path component
     // e.g., "language-reference-guide/symbols/comma" -> "language-reference-guide/docs/symbols/comma"
-    let mut comps = Path::new(path).components();
-    let mut with_docs = PathBuf::new();
-    if let Some(first) = comps.next() {
-        with_docs.push(first.as_os_str());
-        with_docs.push("docs");
-        for c in comps {
-            with_docs.push(c.as_os_str());
+    // Build with forward slashes explicitly: this is a URL-style doc path (later joined
+    // and compared), and using PathBuf here would emit backslashes on Windows.
+    let mut comps = path.split(['/', '\\']).filter(|s| !s.is_empty());
+    match comps.next() {
+        Some(first) => {
+            let mut out = vec![first, "docs"];
+            out.extend(comps);
+            out.join("/")
         }
-    } else {
-        with_docs.push("docs");
+        None => "docs".to_string(),
     }
-    with_docs.to_string_lossy().into_owned()
 }
 
 pub fn missing_files<'a, I>(pages: I) -> Vec<PathBuf>

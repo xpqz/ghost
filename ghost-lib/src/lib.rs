@@ -236,7 +236,7 @@ pub fn audit_traced(
             .push(href.clone());
     }
     for refs in help_refs.values_mut() {
-        refs.sort_by(|a, b| a.line.cmp(&b.line));
+        refs.sort_by_key(|r| r.line);
         refs.dedup();
     }
 

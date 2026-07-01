@@ -1,4 +1,7 @@
-use ghost_lib::{audit, has_footnotes, has_images, has_links, AuditResult, BrokenImage, BrokenLink};
+use ghost_lib::{
+    audit_traced, has_footnotes, has_images, has_links, AuditResult, BrokenImage, BrokenLink,
+    HelpRef, TraceOptions,
+};
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -21,6 +24,9 @@ pub struct AuditOptions {
     pub has_links: bool,
     pub summary: bool,
     pub exclude: String,
+    /// Newline/comma-separated path suffixes to trace (empty ⇒ no tracing).
+    #[serde(default)]
+    pub trace: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -31,6 +37,8 @@ pub struct AuditOutput {
     pub counts: AuditCounts,
     pub items: AuditItems,
     pub git_info: Option<GitInfo>,
+    /// Full processing trace (header + per-file blow-by-blow), empty unless requested.
+    pub trace: String,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -50,7 +58,9 @@ pub struct AuditItems {
 pub struct BrokenLinkItem {
     pub from: String,
     pub link: String,
-    pub from_help_url: bool,
+    /// HELP_URL(...) entries in help_urls.h that reference `from` (empty if not a
+    /// help-URL page). Carries the verbatim source text and line number for the report.
+    pub help_refs: Vec<HelpRef>,
 }
 
 #[derive(Debug, Serialize)]
@@ -384,7 +394,7 @@ fn format_result(
             .map(|bl| BrokenLinkItem {
                 from: relative_path(&bl.from, monorepo_root),
                 link: bl.link.clone(),
-                from_help_url: bl.from_help_url,
+                help_refs: bl.help_refs.clone(),
             })
             .collect();
     }
@@ -466,13 +476,23 @@ fn format_broken_links_section(
             output.push_str("  (none)\n");
         } else {
             for bl in items {
-                let marker = if bl.from_help_url { "[H] " } else { "" };
-                output.push_str(&format!(
-                    "  {}{} -> {}\n",
-                    marker,
-                    relative_path(&bl.from, monorepo_root),
-                    bl.link
-                ));
+                // Help-URL-sourced pages show the actual HELP_URL(...) line(s) in place of
+                // the page path so the entry can be found directly in help_urls.h.
+                if bl.help_refs.is_empty() {
+                    output.push_str(&format!(
+                        "  {} -> {}\n",
+                        relative_path(&bl.from, monorepo_root),
+                        bl.link
+                    ));
+                } else {
+                    let refs = bl
+                        .help_refs
+                        .iter()
+                        .map(|r| r.text.clone())
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    output.push_str(&format!("  [H] {} -> {}\n", refs, bl.link));
+                }
             }
         }
     }
@@ -794,9 +814,25 @@ fn run_audit(options: AuditOptions) -> AuditOutput {
     let monorepo_root = mkdocs_path.parent().map(|p| p.to_path_buf());
     let git_info = monorepo_root.as_deref().and_then(detect_git_info);
 
-    match audit(&mkdocs_path, &help_urls_path) {
-        Ok(result) => {
+    let targets: Vec<String> = options
+        .trace
+        .split(['\n', ','])
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    match audit_traced(&mkdocs_path, &help_urls_path, &TraceOptions { targets }) {
+        Ok((result, trace)) => {
             let (output, counts, items) = format_result(&result, &options, monorepo_root.as_deref());
+            let trace = if trace.text.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "{}{}",
+                    trace_header(&mkdocs_path, &help_urls_path, &options.trace, git_info.as_ref()),
+                    trace.text
+                )
+            };
             AuditOutput {
                 success: true,
                 error: None,
@@ -804,6 +840,7 @@ fn run_audit(options: AuditOptions) -> AuditOutput {
                 counts,
                 items,
                 git_info,
+                trace,
             }
         }
         Err(e) => AuditOutput {
@@ -813,8 +850,37 @@ fn run_audit(options: AuditOptions) -> AuditOutput {
             counts: AuditCounts::default(),
             items: AuditItems::default(),
             git_info,
+            trace: String::new(),
         },
     }
+}
+
+/// Self-contained header prepended to the GUI's processing trace so it can be saved and
+/// forwarded as-is.
+fn trace_header(mkdocs: &Path, help: &Path, targets: &str, git: Option<&GitInfo>) -> String {
+    let mut h = String::new();
+    h.push_str("=== ghost processing trace ===\n");
+    h.push_str(&format!("ghost {}\n", env!("CARGO_PKG_VERSION")));
+    h.push_str(&format!("mkdocs    : {}\n", mkdocs.display()));
+    h.push_str(&format!("help-urls : {}\n", help.display()));
+    if let Some(g) = git {
+        h.push_str(&format!("docs git  : {} @ {}\n", g.branch, g.hash_short));
+    }
+    let targets = targets
+        .split(['\n', ','])
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ");
+    h.push_str(&format!("targets   : {targets}\n"));
+    h.push_str("==============================\n\n");
+    h
+}
+
+/// Write the processing trace to a user-chosen path (from the frontend save dialog).
+#[tauri::command]
+fn save_trace(path: String, contents: String) -> Result<(), String> {
+    std::fs::write(&path, contents).map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -822,7 +888,13 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![run_audit, get_home_dir, open_in_editor, search_docs])
+        .invoke_handler(tauri::generate_handler![
+            run_audit,
+            get_home_dir,
+            open_in_editor,
+            search_docs,
+            save_trace
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

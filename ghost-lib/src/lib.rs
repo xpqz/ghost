@@ -1,13 +1,13 @@
+use pulldown_cmark::{Event, Parser, Tag};
 use regex::Regex;
-use serde::Deserialize;
+use scraper::{Html, Selector};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use walkdir::WalkDir;
-use pulldown_cmark::{Event, Parser, Tag};
-use scraper::{Html, Selector};
 
 /// Normalize a path by resolving `.` and `..` components without requiring filesystem access.
 fn normalize_path(path: &Path) -> PathBuf {
@@ -16,7 +16,10 @@ fn normalize_path(path: &Path) -> PathBuf {
         match component {
             Component::ParentDir => {
                 // Pop the last component if it's a Normal component
-                if result.last().map_or(false, |c| matches!(c, Component::Normal(_))) {
+                if result
+                    .last()
+                    .is_some_and(|c| matches!(c, Component::Normal(_)))
+                {
                     result.pop();
                 } else {
                     result.push(component);
@@ -36,6 +39,10 @@ fn normalize_path(path: &Path) -> PathBuf {
 #[derive(Debug, Deserialize)]
 pub struct MkDocsConfig {
     pub nav: Vec<NavItem>,
+    /// The subsite's display name. The monorepo plugin mounts each `!include`d subsite
+    /// at the slug of its `site_name` (not its directory name), so this drives the URL.
+    #[serde(default)]
+    pub site_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,11 +72,22 @@ pub struct BrokenImage {
     pub image: String,
 }
 
+/// A `HELP_URL(...)` entry from help_urls.h that pulls in a page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HelpRef {
+    /// 1-based line number in help_urls.h.
+    pub line: usize,
+    /// The `HELP_URL(...)` source text, shown verbatim in the report.
+    pub text: String,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct BrokenLink {
     pub from: PathBuf,
     pub link: String,
-    pub from_help_url: bool,
+    /// The `HELP_URL(...)` entries that pull in the `from` page (empty when the page is
+    /// not referenced by help_urls.h). Lets the report cite the actual source line.
+    pub help_refs: Vec<HelpRef>,
 }
 
 #[derive(Debug, Default)]
@@ -78,7 +96,110 @@ pub struct LinkMaps {
     pub src_to_url: HashMap<PathBuf, String>,
 }
 
+/// Which source files to produce a detailed processing trace for. Matched by path
+/// *suffix*, case- and separator-insensitive, so a user can paste the tail of a path
+/// shown in a report (e.g. `system-functions/system-functions-by-category.md`). Empty
+/// ⇒ tracing is off.
+#[derive(Debug, Default, Clone)]
+pub struct TraceOptions {
+    pub targets: Vec<String>,
+}
+
+/// A rendered, forward-ready processing trace — one section per traced file. Empty when
+/// no targets were requested.
+#[derive(Debug, Default)]
+pub struct AuditTrace {
+    pub text: String,
+}
+
+/// Accumulates per-file processing events for the traced source files.
+struct Tracer {
+    /// Normalised (lower-case, `/`-separated) path suffixes to trace.
+    targets: Vec<String>,
+    /// Per-file blow-by-blow lines, keyed by source path.
+    events: HashMap<PathBuf, Vec<String>>,
+}
+
+impl Tracer {
+    fn new(targets: &[String]) -> Self {
+        let targets = targets
+            .iter()
+            .map(|t| t.replace('\\', "/").to_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect();
+        Tracer {
+            targets,
+            events: HashMap::new(),
+        }
+    }
+
+    fn active(&self) -> bool {
+        !self.targets.is_empty()
+    }
+
+    /// Does `path` end with any requested target suffix?
+    fn traces(&self, path: &Path) -> bool {
+        if self.targets.is_empty() {
+            return false;
+        }
+        let s = path.to_string_lossy().replace('\\', "/").to_lowercase();
+        self.targets.iter().any(|t| s.ends_with(t))
+    }
+
+    fn record(&mut self, file: &Path, line: impl Into<String>) {
+        self.events
+            .entry(file.to_path_buf())
+            .or_default()
+            .push(line.into());
+    }
+}
+
+/// Outcome of resolving a `.md` link in the merged monorepo docs tree, carrying enough
+/// detail for the trace to explain *why* a link failed.
+enum MergedResolve {
+    Resolved(PathBuf),
+    /// The link climbed out of the merged docs root (too many `../`).
+    EscapedRoot,
+    /// The first path segment names no known subsite.
+    UnknownSubsite(String),
+    /// The path mapped into a real subsite but no such file exists there.
+    FileMissing(PathBuf),
+}
+
+impl MergedResolve {
+    fn resolved(&self) -> Option<&PathBuf> {
+        match self {
+            MergedResolve::Resolved(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    fn reason(&self) -> String {
+        match self {
+            MergedResolve::Resolved(p) => format!("resolves → {}", p.display()),
+            MergedResolve::EscapedRoot => {
+                "escapes the merged docs root (too many '../')".to_string()
+            }
+            MergedResolve::UnknownSubsite(s) => format!("'{s}' is not a subsite"),
+            MergedResolve::FileMissing(p) => format!("no such file {}", p.display()),
+        }
+    }
+}
+
 pub fn audit(mkdocs_yaml: &Path, help_urls: &Path) -> Result<AuditResult, Box<dyn Error>> {
+    let (result, _trace) = audit_traced(mkdocs_yaml, help_urls, &TraceOptions::default())?;
+    Ok(result)
+}
+
+/// Like [`audit`], but additionally produces an [`AuditTrace`]: a detailed, forward-ready
+/// blow-by-blow of how each file named in `trace_opts` was processed (discovery, role,
+/// and per-link resolution). The trace text is empty when no targets are requested.
+pub fn audit_traced(
+    mkdocs_yaml: &Path,
+    help_urls: &Path,
+    trace_opts: &TraceOptions,
+) -> Result<(AuditResult, AuditTrace), Box<dyn Error>> {
+    let mut tracer = Tracer::new(&trace_opts.targets);
     let contents = fs::read_to_string(mkdocs_yaml)?;
     let config: MkDocsConfig = serde_yaml::from_str(&contents)?;
     let mut pages = HashSet::<PathBuf>::new();
@@ -99,10 +220,25 @@ pub fn audit(mkdocs_yaml: &Path, help_urls: &Path) -> Result<AuditResult, Box<dy
     let mut ghost = orphans(&pages, &files); // markdown files in the file system not referenced by nav
 
     let link_maps = build_link_maps(&config.nav, parent)?;
+    let subsite_map = build_subsite_map(&config.nav, parent);
 
-    let help_files = extract_help_urls(help_urls, parent);
+    // Each HELP_URL entry maps a page to the line it is defined on in help_urls.h.
+    // Group by page so a broken link on a help-referenced page can cite every line that
+    // pulls it in, and so the page is scanned once regardless of how many entries hit it.
+    let help_url_refs = extract_help_url_refs(help_urls, parent);
+    let help_files: Vec<PathBuf> = help_url_refs.iter().map(|(p, _)| p.clone()).collect();
     let help_missing = missing_files(&help_files);
-    let help_files_set: HashSet<PathBuf> = help_files.iter().cloned().collect();
+    let mut help_refs: HashMap<PathBuf, Vec<HelpRef>> = HashMap::new();
+    for (path, href) in &help_url_refs {
+        help_refs
+            .entry(path.clone())
+            .or_default()
+            .push(href.clone());
+    }
+    for refs in help_refs.values_mut() {
+        refs.sort_by(|a, b| a.line.cmp(&b.line));
+        refs.dedup();
+    }
 
     // Transitively scan links: start with nav pages AND help_urls references,
     // then follow links to discover more pages
@@ -117,22 +253,30 @@ pub fn audit(mkdocs_yaml: &Path, help_urls: &Path) -> Result<AuditResult, Box<dy
     let mut all_broken_links: Vec<BrokenLink> = Vec::new();
 
     while !to_scan.is_empty() {
+        // `scanned.insert` returns false for a path already present, so this both marks
+        // files scanned and de-duplicates within the batch. A page referenced many times
+        // by help_urls (e.g. glyphs.md via a shared macro) must be analysed once, not
+        // once per reference — otherwise its links are reported N times.
         let file_contents: Vec<(PathBuf, String)> = to_scan
             .iter()
-            .filter(|p| !scanned.contains(*p))
+            .filter(|p| scanned.insert((*p).clone()))
             .filter_map(|p| fs::read_to_string(p).ok().map(|c| (p.clone(), c)))
             .collect();
-
-        for (p, _) in &file_contents {
-            scanned.insert(p.clone());
-        }
 
         if file_contents.is_empty() {
             break;
         }
 
-        let (referenced, broken_links) =
-            analyse_links(&file_contents, &files_set, parent, &include_dirs, &link_maps, &help_files_set)?;
+        let (referenced, broken_links) = analyse_links(
+            &file_contents,
+            &files_set,
+            parent,
+            &include_dirs,
+            &link_maps,
+            &help_refs,
+            &subsite_map,
+            &mut tracer,
+        )?;
 
         all_broken_links.extend(broken_links);
 
@@ -240,21 +384,136 @@ pub fn audit(mkdocs_yaml: &Path, help_urls: &Path) -> Result<AuditResult, Box<dy
         .cloned()
         .collect();
 
-    Ok(AuditResult {
-        nav_missing,
-        ghost,
-        help_missing,
-        broken_links: all_broken_links,
-        missing_images,
-        orphan_images,
-        pages_with_footnotes,
-        pages_with_images,
-        pages_with_links,
-    })
+    let trace = AuditTrace {
+        text: render_trace(
+            &tracer,
+            &trace_opts.targets,
+            parent,
+            &pages,
+            &help_files,
+            &help_refs,
+            &all_referenced,
+            &scanned,
+            &files_set,
+            &all_broken_links,
+        ),
+    };
+
+    Ok((
+        AuditResult {
+            nav_missing,
+            ghost,
+            help_missing,
+            broken_links: all_broken_links,
+            missing_images,
+            orphan_images,
+            pages_with_footnotes,
+            pages_with_images,
+            pages_with_links,
+        },
+        trace,
+    ))
+}
+
+/// Assemble the human-readable, forward-ready trace text from the collected per-file
+/// events plus the file's role in the audit (discovery, reachability, analysis).
+#[allow(clippy::too_many_arguments)]
+fn render_trace(
+    tracer: &Tracer,
+    targets: &[String],
+    mkdocs_dir: &Path,
+    pages: &HashSet<PathBuf>,
+    help_files: &[PathBuf],
+    help_refs: &HashMap<PathBuf, Vec<HelpRef>>,
+    all_referenced: &HashSet<PathBuf>,
+    scanned: &HashSet<PathBuf>,
+    files_set: &HashSet<PathBuf>,
+    broken_links: &[BrokenLink],
+) -> String {
+    use std::fmt::Write;
+
+    if !tracer.active() {
+        return String::new();
+    }
+
+    // Every path ghost is aware of — files on disk, nav pages, help targets, scanned
+    // pages — so a target can match even a file that is unreachable or missing from disk
+    // (which is itself the useful diagnostic).
+    let mut known: Vec<PathBuf> = files_set.iter().cloned().collect();
+    for p in pages.iter().chain(help_files.iter()).chain(scanned.iter()) {
+        known.push(p.clone());
+    }
+    known.sort();
+    known.dedup();
+
+    let mut out = String::new();
+    for target in targets {
+        let norm = target.replace('\\', "/").to_lowercase();
+        if norm.is_empty() {
+            continue;
+        }
+        let matches: Vec<&PathBuf> = known
+            .iter()
+            .filter(|p| {
+                p.to_string_lossy()
+                    .replace('\\', "/")
+                    .to_lowercase()
+                    .ends_with(&norm)
+            })
+            .collect();
+
+        if matches.is_empty() {
+            let _ = writeln!(out, "FILE (no file known to ghost matched \"{target}\")\n");
+            continue;
+        }
+
+        for f in matches {
+            let rel = f.strip_prefix(mkdocs_dir).unwrap_or(f).display();
+            let _ = writeln!(out, "FILE {rel}");
+            let _ = writeln!(out, "  exists on disk : {}", f.is_file());
+
+            let mut reached = Vec::new();
+            if pages.contains(f) {
+                reached.push("nav".to_string());
+            }
+            if let Some(refs) = help_refs.get(f) {
+                let lines: Vec<String> = refs.iter().map(|r| r.line.to_string()).collect();
+                reached.push(format!("help_urls.h (line {})", lines.join(", ")));
+            }
+            if all_referenced.contains(f) && !pages.contains(f) && !help_refs.contains_key(f) {
+                reached.push("linked from another scanned page".to_string());
+            }
+            if reached.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "  reached by     : NOT REACHED — not in nav, not in help_urls.h, not linked \
+                     from any scanned page (so its links are never checked)"
+                );
+            } else {
+                let _ = writeln!(out, "  reached by     : {}", reached.join(" + "));
+            }
+            let _ = writeln!(out, "  analysed       : {}", scanned.contains(f));
+
+            if let Some(events) = tracer.events.get(f) {
+                for e in events {
+                    let _ = writeln!(out, "  {e}");
+                }
+            }
+
+            let broken_here = broken_links.iter().filter(|b| &b.from == f).count();
+            let _ = writeln!(
+                out,
+                "  SUMMARY        : {broken_here} broken link(s) from this file"
+            );
+            let _ = writeln!(out);
+        }
+    }
+
+    out
 }
 
 /// Check if markdown content contains footnote references or definitions.
-/// Footnotes use syntax like [^1] for references and [^1]: for definitions.
+/// Footnotes use syntax like `[^1]` for references and `[^1]:` for definitions.
 pub fn has_footnotes(markdown: &str) -> bool {
     // Match footnote references [^identifier] or definitions [^identifier]:
     // The identifier can be alphanumeric with hyphens/underscores
@@ -343,7 +602,8 @@ pub fn extract_css_image_refs(css: &str) -> Vec<String> {
         .filter_map(|cap| {
             let url = cap.get(1)?.as_str().trim();
             // Skip data URIs and external URLs
-            if url.starts_with("data:") || url.starts_with("http://") || url.starts_with("https://") {
+            if url.starts_with("data:") || url.starts_with("http://") || url.starts_with("https://")
+            {
                 return None;
             }
             Some(url.to_string())
@@ -357,7 +617,9 @@ where
     I: IntoIterator<Item = String>,
 {
     refs.into_iter()
-        .filter(|r| !r.starts_with("http://") && !r.starts_with("https://") && !r.starts_with("data:"))
+        .filter(|r| {
+            !r.starts_with("http://") && !r.starts_with("https://") && !r.starts_with("data:")
+        })
         .collect()
 }
 
@@ -394,7 +656,9 @@ fn analyse_image_refs(
         if let Ok(content) = fs::read_to_string(css_path) {
             let image_refs = extract_css_image_refs(&content);
             for img_ref in image_refs {
-                if let Some(resolved) = resolve_image_ref(css_path, &img_ref, all_images, include_dirs) {
+                if let Some(resolved) =
+                    resolve_image_ref(css_path, &img_ref, all_images, include_dirs)
+                {
                     referenced.insert(resolved);
                 }
                 // Don't report CSS broken images for now - they may reference build artifacts
@@ -413,15 +677,15 @@ fn resolve_image_ref(
     include_dirs: &[PathBuf],
 ) -> Option<PathBuf> {
     // Handle absolute paths (starting with /)
-    if img_ref.starts_with('/') {
+    if let Some(abs_rel) = img_ref.strip_prefix('/') {
         // Try each include dir as potential root
         for dir in include_dirs {
             // The root for absolute paths is typically the docs/ subdirectory
             let docs_dir = dir.join("docs");
             let candidate = if docs_dir.exists() {
-                normalize_path(&docs_dir.join(&img_ref[1..]))
+                normalize_path(&docs_dir.join(abs_rel))
             } else {
-                normalize_path(&dir.join(&img_ref[1..]))
+                normalize_path(&dir.join(abs_rel))
             };
             if all_images.contains(&candidate) {
                 return Some(candidate);
@@ -456,47 +720,240 @@ fn resolve_image_ref(
     None
 }
 
+/// A normalised internal link target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Link {
+    /// Target path, always ending in `.md` (anchor stripped, extension added if absent).
+    pub target: String,
+    /// Whether the author wrote an explicit `.md` extension on the original link.
+    /// Directory-style (`foo/`) and extensionless (`foo`) links are `false` — MkDocs
+    /// serves those as directory URLs, whereas an explicit `.md` is only rewritten when
+    /// the target resolves within the same subsite.
+    pub had_md: bool,
+}
+
+/// Normalise a single raw link, classifying whether it carried an explicit `.md`
+/// extension. Returns `None` for external, mailto, empty, or non-markdown links
+/// (which we don't check).
+fn normalise_one(link: &str) -> Option<Link> {
+    // drop page-internal anchors first
+    let mut link = link.split('#').next().unwrap_or("").trim().to_string();
+    if link.is_empty() {
+        return None;
+    }
+
+    // skip externals and mailto
+    if link.starts_with("http") || link.starts_with("mailto:") {
+        return None;
+    }
+
+    // trailing slash → directory style; strip and add .md
+    if link.ends_with('/') {
+        link = link.trim_end_matches('/').to_string();
+        if link.is_empty() {
+            return None;
+        }
+        link.push_str(".md");
+        return Some(Link {
+            target: link,
+            had_md: false,
+        });
+    }
+
+    let path = Path::new(&link);
+    match path.extension() {
+        Some(ext) if ext.eq_ignore_ascii_case("md") => Some(Link {
+            target: link,
+            had_md: true,
+        }),
+        Some(_) => None, // non-markdown => drop
+        None => {
+            // add .md when no extension (directory/page-style link)
+            let mut with_ext = link;
+            with_ext.push_str(".md");
+            Some(Link {
+                target: with_ext,
+                had_md: false,
+            })
+        }
+    }
+}
+
 pub fn normalise_links<I>(links: I) -> Vec<String>
 where
     I: IntoIterator<Item = String>,
 {
     links
         .into_iter()
-        .filter_map(|link| {
-            // drop page-internal anchors first
-            let mut link = link.split('#').next().unwrap_or("").trim().to_string();
-            if link.is_empty() {
-                return None;
-            }
-
-            // skip externals and mailto
-            if link.starts_with("http") || link.starts_with("mailto:") {
-                return None;
-            }
-
-            // trailing slash → strip and add .md
-            if link.ends_with('/') {
-                link = link.trim_end_matches('/').to_string();
-                if link.is_empty() {
-                    return None;
-                }
-                link.push_str(".md");
-                return Some(link);
-            }
-
-            let path = Path::new(&link);
-            match path.extension() {
-                Some(ext) if ext == "md" => Some(link), // already markdown
-                Some(_) => None,                        // non-markdown => drop
-                None => {
-                    // add .md when no extension
-                    let mut with_ext = link;
-                    with_ext.push_str(".md");
-                    Some(with_ext)
-                }
-            }
-        })
+        .filter_map(|link| normalise_one(&link).map(|l| l.target))
         .collect()
+}
+
+/// MkDocs filenames are mandated lower-case, so any internal link whose path
+/// contains an upper-case ASCII letter is broken on the (case-sensitive) production
+/// server even if it resolves on a case-insensitive developer filesystem.
+fn link_has_mixed_case(target: &str) -> bool {
+    target.chars().any(|c| c.is_ascii_uppercase())
+}
+
+/// Normalise a relative path, returning `None` if a `..` component escapes the root
+/// instead of silently clamping. (`normalise_url` clamps, which is correct for browser-
+/// style links that legitimately stop at the site root, but wrong for the MkDocs source-
+/// relative `.md` resolution below, where escaping the merged root means "unresolvable".)
+fn normalise_rel_strict(path: &Path) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+            Component::ParentDir => {
+                parts.pop()?;
+            }
+            Component::Normal(c) => parts.push(c.to_string_lossy().into_owned()),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+/// Resolve a `.md` link the way MkDocs (with the monorepo plugin) rewrites it: source-
+/// relative within the *merged* docs tree, where each subsite's `docs/` is mounted at
+/// `<merged>/<subsite>/`. Returns the on-disk target when it resolves to a real markdown
+/// file (so MkDocs rewrites the link to a working URL), or `None` when it escapes the
+/// merged root or no such file exists — in which case MkDocs leaves the literal `.md`
+/// href, which 404s on the directory-URL site (issue #876).
+fn resolve_md_link_merged(
+    src: &Path,
+    link: &str,
+    files_set: &HashSet<PathBuf>,
+    subsite_map: &HashMap<String, PathBuf>,
+) -> MergedResolve {
+    // Structural fallback: if src isn't under a subsite `docs/` dir we can't map it.
+    let Some(docs_dir) = src
+        .ancestors()
+        .find(|a| a.file_name() == Some("docs".as_ref()))
+    else {
+        return MergedResolve::FileMissing(PathBuf::from(link));
+    };
+    let (Some(subsite_dir), Some(subsite_name)) = (
+        docs_dir.parent(),
+        docs_dir.parent().and_then(|d| d.file_name()),
+    ) else {
+        return MergedResolve::FileMissing(PathBuf::from(link));
+    };
+    let Some(monorepo_root) = subsite_dir.parent() else {
+        return MergedResolve::FileMissing(PathBuf::from(link));
+    };
+    let Ok(path_within_docs) = src.strip_prefix(docs_dir) else {
+        return MergedResolve::FileMissing(PathBuf::from(link));
+    };
+
+    // Merged-tree directory containing the source file: `<subsite>/<dir within docs>`.
+    let src_merged = Path::new(subsite_name)
+        .join(path_within_docs)
+        .with_extension("");
+    let merged_dir = src_merged.parent().unwrap_or_else(|| Path::new(""));
+
+    let link_no_ext = Path::new(link).with_extension("");
+    let merged_target = if link.starts_with('/') {
+        // Site-absolute link: relative to the merged root.
+        link_no_ext
+            .strip_prefix("/")
+            .unwrap_or(&link_no_ext)
+            .to_path_buf()
+    } else {
+        merged_dir.join(&link_no_ext)
+    };
+
+    let Some(normalized) = normalise_rel_strict(&merged_target) else {
+        return MergedResolve::EscapedRoot;
+    };
+
+    // Map merged path `<subsite>/<rest>` back to `<subsite dir>/docs/<rest>.md`. The
+    // first segment is a slugified site_name, which may differ from the directory name.
+    let mut comps = normalized.split('/').filter(|s| !s.is_empty());
+    let Some(first) = comps.next() else {
+        return MergedResolve::FileMissing(PathBuf::from(link));
+    };
+    let is_subsite =
+        subsite_map.contains_key(first) || monorepo_root.join(first).join("docs").is_dir();
+    let subsite_dir_for_first = subsite_map
+        .get(first)
+        .cloned()
+        .unwrap_or_else(|| monorepo_root.join(first));
+    let candidate = comps
+        .fold(subsite_dir_for_first.join("docs"), |acc, c| acc.join(c))
+        .with_extension("md")
+        .components()
+        .collect::<PathBuf>();
+
+    match check_with_index_fallback(&candidate, files_set) {
+        Some(p) => MergedResolve::Resolved(p),
+        None if !is_subsite => MergedResolve::UnknownSubsite(first.to_string()),
+        None => MergedResolve::FileMissing(candidate),
+    }
+}
+
+/// Map each subsite's slugified `site_name` (and its directory name, as a fallback) to
+/// the subsite's root directory. The mkdocs-monorepo plugin mounts each `!include`d
+/// subsite at the slug of its `site_name`, which need not match the directory name —
+/// e.g. `.NET Interface Guide` → `net-interface-guide` while the directory is
+/// `dotnet-interface-guide`. Cross-subsite links use the slug, so resolution must be
+/// able to map that slug back to the directory on disk.
+pub fn build_subsite_map(nav: &[NavItem], mkdocs_dir: &Path) -> HashMap<String, PathBuf> {
+    let mut map = HashMap::new();
+    collect_subsite_mounts(nav, mkdocs_dir, &mut map);
+    map
+}
+
+fn collect_subsite_mounts(nav: &[NavItem], mkdocs_dir: &Path, map: &mut HashMap<String, PathBuf>) {
+    for item in nav {
+        match item {
+            NavItem::Page(m) => {
+                for value in m.values() {
+                    if let Some(include_path) = parse_include_target(value) {
+                        register_subsite_mount(include_path, mkdocs_dir, map);
+                    }
+                }
+            }
+            NavItem::Section(m) => {
+                for children in m.values() {
+                    collect_subsite_mounts(children, mkdocs_dir, map);
+                }
+            }
+            NavItem::PlainPath(_) => {}
+        }
+    }
+}
+
+fn register_subsite_mount(
+    include_path: &str,
+    mkdocs_dir: &Path,
+    map: &mut HashMap<String, PathBuf>,
+) {
+    let include_file = mkdocs_dir.join(include_path);
+    let Some(parent) = include_file.parent() else {
+        return;
+    };
+    let subsite_dir: PathBuf = parent.components().collect();
+
+    let Ok(contents) = fs::read_to_string(&include_file) else {
+        return;
+    };
+    let Ok(config) = serde_yaml::from_str::<MkDocsConfig>(&contents) else {
+        return;
+    };
+
+    // The directory name is a valid mount key when site_name slugifies to it.
+    if let Some(dir_name) = subsite_dir.file_name().and_then(|s| s.to_str()) {
+        map.entry(dir_name.to_string())
+            .or_insert_with(|| subsite_dir.clone());
+    }
+    // The slugified site_name is the actual URL mount point.
+    if let Some(site_name) = &config.site_name {
+        map.entry(slugify(site_name))
+            .or_insert_with(|| subsite_dir.clone());
+    }
+    // Nested includes, if any.
+    collect_subsite_mounts(&config.nav, &subsite_dir, map);
 }
 
 // Complex. Map the "virtual" hierarchy as defined by the nav onto the file system so that
@@ -532,7 +989,7 @@ fn build_link_maps_inner(
                         let include_config: MkDocsConfig = serde_yaml::from_str(&include_contents)?;
                         let include_parent = include_file
                             .parent()
-                            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "include has no parent"))?
+                            .ok_or_else(|| io::Error::other("include has no parent"))?
                             .components()
                             .collect::<PathBuf>();
                         let mut child_prefix = url_prefix.to_path_buf();
@@ -596,7 +1053,9 @@ fn insert_mapping(
             .unwrap_or_else(|| nav_path.to_string());
         normalise_url(&url_prefix.join(stem))
     };
-    url_to_src.entry(rendered.clone()).or_insert(fs_path.clone());
+    url_to_src
+        .entry(rendered.clone())
+        .or_insert(fs_path.clone());
     src_to_url.entry(fs_path).or_insert(rendered);
 }
 
@@ -673,39 +1132,114 @@ fn check_with_index_fallback(candidate: &Path, files_set: &HashSet<PathBuf>) -> 
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn analyse_links(
     files: &[(PathBuf, String)],
     files_set: &HashSet<PathBuf>,
     mkdocs_dir: &Path,
     include_dirs: &[PathBuf],
     link_maps: &LinkMaps,
-    help_files: &HashSet<PathBuf>,
+    help_refs: &HashMap<PathBuf, Vec<HelpRef>>,
+    subsite_map: &HashMap<String, PathBuf>,
+    tracer: &mut Tracer,
 ) -> io::Result<(HashSet<PathBuf>, Vec<BrokenLink>)> {
     let mut referenced = HashSet::new();
     let mut broken_links = Vec::new();
 
+    // Render a resolved target relative to the monorepo root for readable trace output.
+    let rel = |p: &Path| -> String {
+        p.strip_prefix(mkdocs_dir)
+            .unwrap_or(p)
+            .display()
+            .to_string()
+    };
+
     for (src, content) in files {
-        let from_help_url = help_files.contains(src);
-        let links = normalise_links(extract_links(content));
-        #[cfg(test)]
-        eprintln!("analysing {} links for {}", links.len(), src.display());
-        for link in links {
+        let src_help_refs = help_refs.get(src).cloned().unwrap_or_default();
+        let links: Vec<Link> = extract_links(content)
+            .into_iter()
+            .filter_map(|l| normalise_one(&l))
+            .collect();
+        let tracing = tracer.traces(src);
+        if tracing {
+            tracer.record(src, format!("internal links: {}", links.len()));
+        }
+        for Link {
+            target: link,
+            had_md,
+        } in links
+        {
+            if tracing {
+                tracer.record(src, format!("LINK  {link}  (had_md={had_md})"));
+            }
+
+            // 0a) Filenames are mandated lower-case: a mixed-case link is broken on
+            // the case-sensitive production server even if it resolves locally.
+            if link_has_mixed_case(&link) {
+                if tracing {
+                    tracer.record(src, "  mixed-case → BROKEN (lower-case is mandated)");
+                }
+                broken_links.push(BrokenLink {
+                    from: src.clone(),
+                    link: link.clone(),
+                    help_refs: src_help_refs.clone(),
+                });
+                continue;
+            }
+
+            // 0b) MkDocs rewrites a `.md` link only when it resolves source-relative
+            // within the merged monorepo docs tree (each subsite's docs/ mounted at
+            // <merged>/<subsite>/). If it doesn't, the literal `.md` href is left in
+            // place and 404s on the directory-URL site. Bare/directory-style links are
+            // served as real URLs (resolved by the browser), so this gate only applies
+            // to links the author wrote with an explicit `.md`.
+            if had_md {
+                let outcome = resolve_md_link_merged(src, &link, files_set, subsite_map);
+                match outcome.resolved() {
+                    Some(target) => {
+                        if tracing {
+                            tracer.record(src, format!("  .md merged-tree: {}", outcome.reason()));
+                        }
+                        referenced.insert(target.clone());
+                    }
+                    None => {
+                        if tracing {
+                            tracer.record(
+                                src,
+                                format!("  .md merged-tree: {} → BROKEN", outcome.reason()),
+                            );
+                        }
+                        broken_links.push(BrokenLink {
+                            from: src.clone(),
+                            link: link.clone(),
+                            help_refs: src_help_refs.clone(),
+                        });
+                    }
+                }
+                continue;
+            }
+
             // 1) Try nav-based resolution
             if let Some(target) = resolve_link(src, &link, link_maps) {
-                #[cfg(test)]
-                eprintln!("resolved via nav: {} -> {}", link, target.display());
+                if tracing {
+                    tracer.record(src, format!("  resolved via nav → {}", rel(&target)));
+                }
                 referenced.insert(target);
                 continue;
             }
 
             // 2) Try URL-space resolution (handles cross-subsite links and sibling files)
             // Try both page-as-directory model (how browsers resolve) and parent-dir model
-            let url_candidates = resolve_link_via_url_space(src, &link, mkdocs_dir);
+            let url_candidates = resolve_link_via_url_space(src, &link, mkdocs_dir, subsite_map);
             let mut url_resolved = false;
             for candidate in url_candidates {
                 if let Some(resolved) = check_with_index_fallback(&candidate, files_set) {
-                    #[cfg(test)]
-                    eprintln!("resolved via url space: {} -> {}", link, resolved.display());
+                    if tracing {
+                        tracer.record(
+                            src,
+                            format!("  resolved via url-space → {}", rel(&resolved)),
+                        );
+                    }
                     referenced.insert(resolved);
                     url_resolved = true;
                     break;
@@ -726,8 +1260,12 @@ fn analyse_links(
                         .components()
                         .collect::<PathBuf>();
                     if let Some(resolved) = check_with_index_fallback(&candidate, files_set) {
-                        #[cfg(test)]
-                        eprintln!("resolved via doc root: {} -> {}", link, resolved.display());
+                        if tracing {
+                            tracer.record(
+                                src,
+                                format!("  resolved via doc root → {}", rel(&resolved)),
+                            );
+                        }
                         referenced.insert(resolved);
                         continue;
                     }
@@ -742,8 +1280,12 @@ fn analyse_links(
                         .components()
                         .collect::<PathBuf>();
                     if let Some(resolved) = check_with_index_fallback(&candidate, files_set) {
-                        #[cfg(test)]
-                        eprintln!("resolved via include dir: {} -> {}", link, resolved.display());
+                        if tracing {
+                            tracer.record(
+                                src,
+                                format!("  resolved via include dir → {}", rel(&resolved)),
+                            );
+                        }
                         referenced.insert(resolved);
                         hit = true;
                         break;
@@ -755,48 +1297,55 @@ fn analyse_links(
             }
 
             // 4) Final fallback: resolve on filesystem relative to source doc root
-            if let Some(fs_candidate) = fs_path_from_link(src, &link) {
-                if let Some(resolved) = check_with_index_fallback(&fs_candidate, files_set) {
-                    #[cfg(test)]
-                    eprintln!("resolved via fs fallback: {} -> {}", link, resolved.display());
-                    referenced.insert(resolved);
-                    continue;
+            if let Some(fs_candidate) = fs_path_from_link(src, &link)
+                && let Some(resolved) = check_with_index_fallback(&fs_candidate, files_set)
+            {
+                if tracing {
+                    tracer.record(
+                        src,
+                        format!("  resolved via fs fallback → {}", rel(&resolved)),
+                    );
                 }
+                referenced.insert(resolved);
+                continue;
             }
 
             // 5) Last resort: plain filesystem relative to source parent
             if let Some(parent) = src.parent() {
                 let candidate = parent.join(&link).components().collect::<PathBuf>();
                 if let Some(resolved) = check_with_index_fallback(&candidate, files_set) {
-                    #[cfg(test)]
-                    eprintln!("resolved via parent fallback: {} -> {}", link, resolved.display());
+                    if tracing {
+                        tracer.record(
+                            src,
+                            format!("  resolved via parent fallback → {}", rel(&resolved)),
+                        );
+                    }
                     referenced.insert(resolved);
                     continue;
                 }
             }
 
             // Unresolved
-            #[cfg(test)]
-            eprintln!("broken: {} -> {}", src.display(), link);
+            if tracing {
+                tracer.record(src, "  no strategy resolved it → BROKEN");
+            }
             broken_links.push(BrokenLink {
                 from: src.clone(),
                 link: link.clone(),
-                from_help_url,
+                help_refs: src_help_refs.clone(),
             });
         }
     }
 
-    #[cfg(test)]
-    eprintln!("returning broken_links len {}", broken_links.len());
     Ok((referenced, broken_links))
 }
 
 fn docs_root_for(path: &Path) -> Option<PathBuf> {
     for ancestor in path.ancestors() {
-        if let Some(file_name) = ancestor.file_name() {
-            if file_name == "docs" {
-                return ancestor.parent().map(|p| p.to_path_buf());
-            }
+        if let Some(file_name) = ancestor.file_name()
+            && file_name == "docs"
+        {
+            return ancestor.parent().map(|p| p.to_path_buf());
         }
     }
     None
@@ -841,11 +1390,19 @@ fn fs_path_from_link(src: &Path, link: &str) -> Option<PathBuf> {
 ///                          = guide/config/aplan-editor
 ///
 ///   Filesystem: /base/guide/docs/config/aplan-editor.md
-fn resolve_link_via_url_space(src: &Path, link: &str, monorepo_root: &Path) -> Vec<PathBuf> {
+fn resolve_link_via_url_space(
+    src: &Path,
+    link: &str,
+    monorepo_root: &Path,
+    subsite_map: &HashMap<String, PathBuf>,
+) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
     // Find the docs/ directory containing src
-    let Some(docs_dir) = src.ancestors().find(|a| a.file_name() == Some("docs".as_ref())) else {
+    let Some(docs_dir) = src
+        .ancestors()
+        .find(|a| a.file_name() == Some("docs".as_ref()))
+    else {
         return candidates;
     };
     let Some(subsite_dir) = docs_dir.parent() else {
@@ -859,7 +1416,9 @@ fn resolve_link_via_url_space(src: &Path, link: &str, monorepo_root: &Path) -> V
     let Ok(path_within_docs) = src.strip_prefix(docs_dir) else {
         return candidates;
     };
-    let src_url_path = Path::new(subsite_name).join(path_within_docs).with_extension("");
+    let src_url_path = Path::new(subsite_name)
+        .join(path_within_docs)
+        .with_extension("");
 
     let link_path = Path::new(link).with_extension("");
 
@@ -877,8 +1436,17 @@ fn resolve_link_via_url_space(src: &Path, link: &str, monorepo_root: &Path) -> V
 
     // Handle absolute links
     if link.starts_with('/') {
-        let resolved = link_path.strip_prefix("/").unwrap_or(&link_path).to_path_buf();
-        if let Some(fs_path) = url_to_filesystem(&normalise_url(&resolved), subsite_name, docs_dir, monorepo_root) {
+        let resolved = link_path
+            .strip_prefix("/")
+            .unwrap_or(&link_path)
+            .to_path_buf();
+        if let Some(fs_path) = url_to_filesystem(
+            &normalise_url(&resolved),
+            subsite_name,
+            docs_dir,
+            monorepo_root,
+            subsite_map,
+        ) {
             candidates.push(fs_path);
         }
         return candidates;
@@ -892,10 +1460,15 @@ fn resolve_link_via_url_space(src: &Path, link: &str, monorepo_root: &Path) -> V
             continue;
         }
 
-        if let Some(fs_path) = url_to_filesystem(&normalized_url, subsite_name, docs_dir, monorepo_root) {
-            if !candidates.contains(&fs_path) {
-                candidates.push(fs_path);
-            }
+        if let Some(fs_path) = url_to_filesystem(
+            &normalized_url,
+            subsite_name,
+            docs_dir,
+            monorepo_root,
+            subsite_map,
+        ) && !candidates.contains(&fs_path)
+        {
+            candidates.push(fs_path);
         }
     }
 
@@ -903,25 +1476,36 @@ fn resolve_link_via_url_space(src: &Path, link: &str, monorepo_root: &Path) -> V
 }
 
 /// Map a normalized URL path back to a filesystem path
-fn url_to_filesystem(normalized_url: &str, subsite_name: &str, docs_dir: &Path, monorepo_root: &Path) -> Option<PathBuf> {
+fn url_to_filesystem(
+    normalized_url: &str,
+    subsite_name: &str,
+    docs_dir: &Path,
+    monorepo_root: &Path,
+    subsite_map: &HashMap<String, PathBuf>,
+) -> Option<PathBuf> {
     let mut url_parts = normalized_url.split('/');
     let first_component = url_parts.next()?;
     let rest: Vec<&str> = url_parts.collect();
 
-    // Check if first_component is a separate subsite (has its own docs/ folder)
-    // or just a directory within the current subsite
-    let candidate_subsite_docs = monorepo_root.join(first_component).join("docs");
+    // Resolve the first URL segment to a subsite directory. The monorepo plugin mounts
+    // subsites at their slugified site_name, which may differ from the directory name
+    // (e.g. net-interface-guide → dir dotnet-interface-guide), so consult the
+    // site_name→dir map before falling back to an identically-named directory.
+    let target_subsite_dir = subsite_map.get(first_component).cloned().or_else(|| {
+        let dir = monorepo_root.join(first_component);
+        dir.join("docs").is_dir().then_some(dir)
+    });
 
-    let fs_path = if first_component != subsite_name && candidate_subsite_docs.is_dir() {
-        // Cross-subsite link: insert docs/ after the target subsite
-        let mut path = candidate_subsite_docs;
-        for part in rest {
-            path = path.join(part);
+    let fs_path = match target_subsite_dir {
+        Some(dir) if first_component != subsite_name => {
+            // Cross-subsite link: insert docs/ after the target subsite
+            rest.iter()
+                .fold(dir.join("docs"), |acc, part| acc.join(part))
         }
-        path
-    } else {
-        // Same subsite: the resolved URL path is relative to source's docs/
-        docs_dir.join(normalized_url.trim_start_matches(&format!("{}/", subsite_name)))
+        _ => {
+            // Same subsite: the resolved URL path is relative to source's docs/
+            docs_dir.join(normalized_url.trim_start_matches(&format!("{}/", subsite_name)))
+        }
     };
 
     Some(fs_path.with_extension("md").components().collect())
@@ -1021,6 +1605,9 @@ fn strip_c_comments(content: &str) -> String {
             if ch == '*' && chars.peek() == Some(&'/') {
                 chars.next(); // consume the '/'
                 in_block_comment = false;
+            } else if ch == '\n' {
+                // Preserve newlines so line numbers stay aligned with the original file.
+                result.push('\n');
             }
         } else if ch == '/' {
             match chars.peek() {
@@ -1056,7 +1643,22 @@ where
     P1: AsRef<Path>,
     P2: AsRef<Path>,
 {
+    extract_help_url_refs(path, doc_root)
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect()
+}
+
+/// Like [`extract_help_urls`], but also returns the source [`HelpRef`] (line number and
+/// verbatim `HELP_URL(...)` text) for each entry, so broken links on help-referenced
+/// pages can be traced back to — and show — their `help_urls.h` definition.
+pub fn extract_help_url_refs<P1, P2>(path: P1, doc_root: P2) -> Vec<(PathBuf, HelpRef)>
+where
+    P1: AsRef<Path>,
+    P2: AsRef<Path>,
+{
     let raw_content = fs::read_to_string(path).expect("failed to read file");
+    // strip_c_comments preserves newlines, so offsets still map to original line numbers.
     let content = strip_c_comments(&raw_content);
 
     let define = Regex::new(r#"#define\s+(\w+)\s+"([^"]+)""#).unwrap();
@@ -1078,13 +1680,22 @@ where
 
     url_re
         .captures_iter(&content)
-        .filter_map(|cap| {
+        .map(|cap| {
+            let whole = cap.get(0).unwrap();
+            let line = content[..whole.start()]
+                .bytes()
+                .filter(|&b| b == b'\n')
+                .count()
+                + 1;
+            let text = whole.as_str().to_string();
             let raw = cap.get(2).unwrap().as_str().trim();
             let expanded = expand_url(raw, &macros);
             let with_docs = inject_docs(&expanded);
             let relative_path = with_docs + ".md";
-            let absolute_path = doc_root.as_ref().join(relative_path);
-            Some(absolute_path)
+            (
+                doc_root.as_ref().join(relative_path),
+                HelpRef { line, text },
+            )
         })
         .collect()
 }
@@ -1163,8 +1774,7 @@ where
 
 fn walkdir_error(err: walkdir::Error) -> io::Error {
     let msg = err.to_string();
-    err.into_io_error()
-        .unwrap_or_else(|| io::Error::new(io::ErrorKind::Other, msg))
+    err.into_io_error().unwrap_or_else(|| io::Error::other(msg))
 }
 
 pub fn orphans(nav: &HashSet<PathBuf>, files: &[PathBuf]) -> Vec<PathBuf> {
@@ -1451,7 +2061,10 @@ nav:
             }),
             NavItem::Page({
                 let mut m = HashMap::new();
-                m.insert("Include".to_string(), "!include ./release-notes/mkdocs.yml".to_string());
+                m.insert(
+                    "Include".to_string(),
+                    "!include ./release-notes/mkdocs.yml".to_string(),
+                );
                 m
             }),
         ];
@@ -1522,7 +2135,9 @@ nav:
         let files = find_markdown(vec![root]).unwrap();
         assert_eq!(files.len(), 1);
 
-        let links = normalise_links(extract_links(&fs::read_to_string(docs.join("a.md")).unwrap()));
+        let links = normalise_links(extract_links(
+            &fs::read_to_string(docs.join("a.md")).unwrap(),
+        ));
         assert_eq!(links, vec!["missing.md"]);
 
         let files_set: HashSet<PathBuf> = files.iter().cloned().collect();
@@ -1532,7 +2147,7 @@ nav:
             .collect::<io::Result<_>>()
             .unwrap();
         let link_maps = build_link_maps(
-            &vec![NavItem::Page({
+            &[NavItem::Page({
                 let mut m = HashMap::new();
                 m.insert("A".to_string(), "a.md".to_string());
                 m
@@ -1540,8 +2155,17 @@ nav:
             root,
         )
         .unwrap();
-        let (_refd, broken_direct) =
-            analyse_links(&file_contents, &files_set, root, &[], &link_maps, &HashSet::new()).unwrap();
+        let (_refd, broken_direct) = analyse_links(
+            &file_contents,
+            &files_set,
+            root,
+            &[],
+            &link_maps,
+            &HashMap::new(),
+            &HashMap::new(),
+            &mut Tracer::new(&[]),
+        )
+        .unwrap();
         assert_eq!(broken_direct.len(), 1, "{:?}", broken_direct);
 
         let result = audit(&root.join("mkdocs.yml"), &root.join("help_urls.h")).unwrap();
@@ -1549,7 +2173,6 @@ nav:
         assert_eq!(result.broken_links[0].from, docs.join("a.md"));
         assert_eq!(result.broken_links[0].link, "missing.md");
     }
-
 
     #[test]
     fn test_relative_parent_link_with_anchor_resolves() {
@@ -1562,7 +2185,11 @@ nav:
             "see [Function Composition](../operator-syntax#function-composition)",
         )
         .unwrap();
-        fs::write(root.join("docs").join("operator-syntax.md"), "# Operator Syntax").unwrap();
+        fs::write(
+            root.join("docs").join("operator-syntax.md"),
+            "# Operator Syntax",
+        )
+        .unwrap();
         fs::write(root.join("help_urls.h"), "").unwrap();
 
         let mkdocs = r#"
@@ -1587,7 +2214,11 @@ nav:
         )
         .unwrap();
         // target exists on filesystem but is not in nav
-        fs::write(root.join("docs").join("operator-syntax.md"), "# Operator Syntax").unwrap();
+        fs::write(
+            root.join("docs").join("operator-syntax.md"),
+            "# Operator Syntax",
+        )
+        .unwrap();
         fs::write(root.join("help_urls.h"), "").unwrap();
 
         let mkdocs = r#"
@@ -1624,7 +2255,10 @@ nav:
     #[test]
     fn test_expand_url_with_macro() {
         let mut macros = HashMap::new();
-        macros.insert("SY".to_string(), "language-reference-guide/symbols".to_string());
+        macros.insert(
+            "SY".to_string(),
+            "language-reference-guide/symbols".to_string(),
+        );
         let result = expand_url("SY\"/comma\"", &macros);
         assert_eq!(result, "language-reference-guide/symbols/comma");
     }
@@ -1643,8 +2277,8 @@ nav:
 
     #[test]
     fn test_extract_help_urls_ignores_comments() {
-        use tempfile::NamedTempFile;
         use std::io::Write;
+        use tempfile::NamedTempFile;
 
         let mut temp_file = NamedTempFile::new().unwrap();
         writeln!(
@@ -1664,13 +2298,17 @@ HELP_URL(",", SY"/comma")
 
         // Should have 1 URL (the comma one), not 2 (comment should be ignored)
         assert_eq!(result.len(), 1);
-        assert!(result[0].to_string_lossy().contains("language-reference-guide/docs/symbols/comma.md"));
+        assert!(
+            result[0]
+                .to_string_lossy()
+                .contains("language-reference-guide/docs/symbols/comma.md")
+        );
     }
 
     #[test]
     fn test_extract_help_urls_expands_macros() {
-        use tempfile::NamedTempFile;
         use std::io::Write;
+        use tempfile::NamedTempFile;
 
         let mut temp_file = NamedTempFile::new().unwrap();
         writeln!(
@@ -1694,8 +2332,8 @@ HELP_URL(",", SY"/comma")
 
     #[test]
     fn test_extract_help_urls_injects_docs() {
-        use tempfile::NamedTempFile;
         use std::io::Write;
+        use tempfile::NamedTempFile;
 
         let mut temp_file = NamedTempFile::new().unwrap();
         writeln!(
@@ -1714,7 +2352,9 @@ HELP_URL(":if", "programming-reference-guide/defined-functions-and-operators/tra
         assert_eq!(result.len(), 1);
         let path_str = result[0].to_string_lossy();
         assert!(path_str.contains("/docs/"));
-        assert!(path_str.contains("programming-reference-guide/docs/defined-functions-and-operators"));
+        assert!(
+            path_str.contains("programming-reference-guide/docs/defined-functions-and-operators")
+        );
     }
 
     #[test]
@@ -1728,7 +2368,11 @@ HELP_URL(":if", "programming-reference-guide/defined-functions-and-operators/tra
             "see [Operator Syntax](../operator-syntax.md)",
         )
         .unwrap();
-        fs::write(root.join("docs").join("operator-syntax.md"), "# Operator Syntax").unwrap();
+        fs::write(
+            root.join("docs").join("operator-syntax.md"),
+            "# Operator Syntax",
+        )
+        .unwrap();
         fs::write(root.join("help_urls.h"), "").unwrap();
 
         let mkdocs = r#"
@@ -1751,12 +2395,16 @@ nav:
         let temp_dir = tempfile::tempdir().unwrap();
         let root = temp_dir.path();
 
-        // Create release-notes subsite
+        // Create release-notes subsite.
+        // NB: cross-subsite links must be written *without* a `.md` extension —
+        // MkDocs/monorepo only rewrites `.md` links that stay within a subsite, so a
+        // cross-subsite `.md` href 404s on the live site (see issue #876). The valid
+        // form is the directory-style URL below.
         let rn_docs = root.join("release-notes").join("docs");
         fs::create_dir_all(&rn_docs).unwrap();
         fs::write(
             rn_docs.join("new-enhanced.md"),
-            "see [Array Notation](../../programming-reference-guide/introduction/arrays/array-notation.md)",
+            "see [Array Notation](../../programming-reference-guide/introduction/arrays/array-notation)",
         )
         .unwrap();
         let rn_mkdocs = r#"
@@ -1766,7 +2414,11 @@ nav:
         fs::write(root.join("release-notes").join("mkdocs.yml"), rn_mkdocs).unwrap();
 
         // Create programming-reference-guide subsite
-        let prg_docs = root.join("programming-reference-guide").join("docs").join("introduction").join("arrays");
+        let prg_docs = root
+            .join("programming-reference-guide")
+            .join("docs")
+            .join("introduction")
+            .join("arrays");
         fs::create_dir_all(&prg_docs).unwrap();
         fs::write(prg_docs.join("array-notation.md"), "# Array Notation").unwrap();
         let prg_mkdocs = r#"
@@ -1775,7 +2427,11 @@ nav:
     - Arrays:
       - Array Notation: introduction/arrays/array-notation.md
 "#;
-        fs::write(root.join("programming-reference-guide").join("mkdocs.yml"), prg_mkdocs).unwrap();
+        fs::write(
+            root.join("programming-reference-guide").join("mkdocs.yml"),
+            prg_mkdocs,
+        )
+        .unwrap();
 
         // Create root mkdocs.yml that includes both subsites
         let root_mkdocs = r#"
@@ -1792,17 +2448,23 @@ nav:
 
     #[test]
     fn test_sibling_file_via_parent_link_resolves() {
-        // MkDocs treats pages as directories, so ../sibling.md from page `dir/foo`
-        // resolves to `dir/sibling`, not to sibling at the parent level
+        // A *bare* (extensionless) link is served as a directory URL and resolved by the
+        // browser page-as-directory: `../aplan-for-editor` from page `config-params/aplan-for-output`
+        // resolves to `config-params/aplan-for-editor`. This mirrors the real docs, where
+        // the link is written without a `.md` extension. (An explicit `.md` here would be
+        // broken — MkDocs resolves `.md` links source-relative, see issue #876.)
         let temp_dir = tempfile::tempdir().unwrap();
         let root = temp_dir.path();
 
-        let docs = root.join("windows-guide").join("docs").join("config-params");
+        let docs = root
+            .join("windows-guide")
+            .join("docs")
+            .join("config-params");
         fs::create_dir_all(&docs).unwrap();
 
         fs::write(
             docs.join("aplan-for-output.md"),
-            "see [Editor](../aplan-for-editor.md)",
+            "see [Editor](../aplan-for-editor)",
         )
         .unwrap();
         fs::write(docs.join("aplan-for-editor.md"), "# Editor").unwrap();
@@ -1838,10 +2500,12 @@ nav:
         fs::create_dir_all(&intro).unwrap();
         fs::create_dir_all(&ravel_dir).unwrap();
 
-        // Source file links to ravel.md, but ravel is a directory with index.md
+        // Source file links to ravel.md, but ravel is a directory with index.md.
+        // The link stays within the subsite (source-relative), so the `.md` is valid
+        // and MkDocs rewrites it to the rendered `ravel/` URL.
         fs::write(
             intro.join("structuring.md"),
-            "see [Ravel](../../../../language-reference-guide/primitive-functions/ravel.md)",
+            "see [Ravel](../../primitive-functions/ravel.md)",
         )
         .unwrap();
         fs::write(ravel_dir.join("index.md"), "# Ravel").unwrap();
@@ -1854,7 +2518,11 @@ nav:
   - Primitive Functions:
     - Ravel: primitive-functions/ravel/index.md
 "#;
-        fs::write(root.join("language-reference-guide").join("mkdocs.yml"), lrg_mkdocs).unwrap();
+        fs::write(
+            root.join("language-reference-guide").join("mkdocs.yml"),
+            lrg_mkdocs,
+        )
+        .unwrap();
 
         let root_mkdocs = r#"
 nav:
@@ -1869,19 +2537,22 @@ nav:
 
     #[test]
     fn test_within_subsite_deep_relative_link_resolves() {
-        // Simulates link within same subsite that goes up multiple levels:
+        // Simulates link within same subsite that goes up multiple levels but stays
+        // inside docs/ (so MkDocs rewrites it):
         //   root/
-        //     language-reference-guide/docs/system-functions/shell.md
+        //     language-reference-guide/docs/system-functions/i-beam/shell.md
         //       links to ../../primitive-operators/i-beam/shell-process-control.md
         //     language-reference-guide/docs/primitive-operators/i-beam/shell-process-control.md
         //
-        // This should NOT be treated as cross-subsite (primitive-operators is not a subsite)
+        // This should NOT be treated as cross-subsite (primitive-operators is not a subsite).
+        // The two `../` land back at docs/ root, not above it — contrast with the
+        // over-deep case in test_issue876_overdeep_md_link_is_broken.
         let temp_dir = tempfile::tempdir().unwrap();
         let root = temp_dir.path();
 
         // Create language-reference-guide subsite with nested structure
         let lrg_docs = root.join("language-reference-guide").join("docs");
-        let sys_funcs = lrg_docs.join("system-functions");
+        let sys_funcs = lrg_docs.join("system-functions").join("i-beam");
         let prim_ops = lrg_docs.join("primitive-operators").join("i-beam");
         fs::create_dir_all(&sys_funcs).unwrap();
         fs::create_dir_all(&prim_ops).unwrap();
@@ -1891,17 +2562,25 @@ nav:
             "see [Shell Process Control](../../primitive-operators/i-beam/shell-process-control.md)",
         )
         .unwrap();
-        fs::write(prim_ops.join("shell-process-control.md"), "# Shell Process Control").unwrap();
+        fs::write(
+            prim_ops.join("shell-process-control.md"),
+            "# Shell Process Control",
+        )
+        .unwrap();
 
         let lrg_mkdocs = r#"
 nav:
   - System Functions:
-    - Shell: system-functions/shell.md
+    - Shell: system-functions/i-beam/shell.md
   - Primitive Operators:
     - I-Beam:
       - Shell Process Control: primitive-operators/i-beam/shell-process-control.md
 "#;
-        fs::write(root.join("language-reference-guide").join("mkdocs.yml"), lrg_mkdocs).unwrap();
+        fs::write(
+            root.join("language-reference-guide").join("mkdocs.yml"),
+            lrg_mkdocs,
+        )
+        .unwrap();
 
         // Create root mkdocs.yml
         let root_mkdocs = r#"
@@ -1915,6 +2594,341 @@ nav:
         assert!(result.broken_links.is_empty(), "{:?}", result.broken_links);
     }
 
+    // ---- Regression tests for issue #876 (links ghost previously failed to flag) ----
+
+    /// An over-deep `.md` link with one too many `../` escapes the subsite docs/ root,
+    /// so MkDocs leaves the literal `.md` href and it 404s. Mirrors the reported
+    /// `system-functions-by-category.md -> ../../primitive-operators/spawn.md`.
+    #[test]
+    fn test_issue876_overdeep_md_link_is_broken() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        let docs = root.join("language-reference-guide").join("docs");
+        fs::create_dir_all(docs.join("system-functions")).unwrap();
+        fs::create_dir_all(docs.join("primitive-operators")).unwrap();
+        // One `../` too many: ../../ from system-functions/ escapes docs/.
+        fs::write(
+            docs.join("system-functions").join("by-category.md"),
+            "threads via [Spawn](../../primitive-operators/spawn.md)",
+        )
+        .unwrap();
+        fs::write(docs.join("primitive-operators").join("spawn.md"), "# Spawn").unwrap();
+
+        let lrg_mkdocs = r#"
+nav:
+  - By Category: system-functions/by-category.md
+  - Spawn: primitive-operators/spawn.md
+"#;
+        fs::write(
+            root.join("language-reference-guide").join("mkdocs.yml"),
+            lrg_mkdocs,
+        )
+        .unwrap();
+        let root_mkdocs = r#"
+nav:
+  - Language Reference: '!include ./language-reference-guide/mkdocs.yml'
+"#;
+        fs::write(root.join("mkdocs.yml"), root_mkdocs).unwrap();
+        fs::write(root.join("help_urls.h"), "").unwrap();
+
+        let result = audit(&root.join("mkdocs.yml"), &root.join("help_urls.h")).unwrap();
+        assert_eq!(result.broken_links.len(), 1, "{:?}", result.broken_links);
+        assert_eq!(
+            result.broken_links[0].link,
+            "../../primitive-operators/spawn.md"
+        );
+    }
+
+    /// A cross-subsite link carrying a `.md` extension is not rewritten by the monorepo
+    /// plugin, so the `.md` href 404s even though the target page exists. Mirrors the
+    /// reported `system-functions-by-category.md -> .../interface-guide/dde/shared-variable-principles.md`.
+    #[test]
+    fn test_issue876_cross_subsite_md_link_is_broken() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+
+        let lrg_docs = root.join("language-reference-guide").join("docs");
+        fs::create_dir_all(lrg_docs.join("system-functions")).unwrap();
+        fs::write(
+            lrg_docs.join("system-functions").join("by-category.md"),
+            "the [shared variable](../../../interface-guide/dde/shared-variable-principles.md) interface",
+        )
+        .unwrap();
+        fs::write(
+            root.join("language-reference-guide").join("mkdocs.yml"),
+            "nav:\n  - By Category: system-functions/by-category.md\n",
+        )
+        .unwrap();
+
+        let ig_docs = root.join("interface-guide").join("docs").join("dde");
+        fs::create_dir_all(&ig_docs).unwrap();
+        // The target page genuinely exists — only the `.md` extension makes it broken.
+        fs::write(
+            ig_docs.join("shared-variable-principles.md"),
+            "# Shared Variables",
+        )
+        .unwrap();
+        fs::write(
+            root.join("interface-guide").join("mkdocs.yml"),
+            "nav:\n  - Principles: dde/shared-variable-principles.md\n",
+        )
+        .unwrap();
+
+        let root_mkdocs = r#"
+nav:
+  - Language Reference: '!include ./language-reference-guide/mkdocs.yml'
+  - Interfaces: '!include ./interface-guide/mkdocs.yml'
+"#;
+        fs::write(root.join("mkdocs.yml"), root_mkdocs).unwrap();
+        fs::write(root.join("help_urls.h"), "").unwrap();
+
+        let result = audit(&root.join("mkdocs.yml"), &root.join("help_urls.h")).unwrap();
+        assert!(
+            result
+                .broken_links
+                .iter()
+                .any(|bl| bl.link == "../../../interface-guide/dde/shared-variable-principles.md"),
+            "{:?}",
+            result.broken_links
+        );
+    }
+
+    /// The same cross-subsite target written *without* a `.md` extension (directory-style
+    /// URL) is valid — MkDocs serves it. This must keep resolving so we don't regress the
+    /// hundreds of legitimate bare cross-subsite links.
+    #[test]
+    fn test_bare_cross_subsite_link_resolves() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+
+        let lrg_docs = root.join("language-reference-guide").join("docs");
+        fs::create_dir_all(lrg_docs.join("system-functions")).unwrap();
+        fs::write(
+            lrg_docs.join("system-functions").join("by-category.md"),
+            "the [shared variable](../../../interface-guide/dde/shared-variable-principles) interface",
+        )
+        .unwrap();
+        fs::write(
+            root.join("language-reference-guide").join("mkdocs.yml"),
+            "nav:\n  - By Category: system-functions/by-category.md\n",
+        )
+        .unwrap();
+
+        let ig_docs = root.join("interface-guide").join("docs").join("dde");
+        fs::create_dir_all(&ig_docs).unwrap();
+        fs::write(
+            ig_docs.join("shared-variable-principles.md"),
+            "# Shared Variables",
+        )
+        .unwrap();
+        fs::write(
+            root.join("interface-guide").join("mkdocs.yml"),
+            "nav:\n  - Principles: dde/shared-variable-principles.md\n",
+        )
+        .unwrap();
+
+        let root_mkdocs = r#"
+nav:
+  - Language Reference: '!include ./language-reference-guide/mkdocs.yml'
+  - Interfaces: '!include ./interface-guide/mkdocs.yml'
+"#;
+        fs::write(root.join("mkdocs.yml"), root_mkdocs).unwrap();
+        fs::write(root.join("help_urls.h"), "").unwrap();
+
+        let result = audit(&root.join("mkdocs.yml"), &root.join("help_urls.h")).unwrap();
+        assert!(result.broken_links.is_empty(), "{:?}", result.broken_links);
+    }
+
+    /// Filenames are mandated lower-case, so a link with mixed case is flagged even
+    /// though it resolves on a case-insensitive (macOS) filesystem. Mirrors the reported
+    /// `thorn.md -> ../primitive-functions/format-by-Specification.md`.
+    #[test]
+    fn test_issue876_mixed_case_link_is_broken() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        let docs = root.join("language-reference-guide").join("docs");
+        fs::create_dir_all(docs.join("symbols")).unwrap();
+        fs::create_dir_all(docs.join("primitive-functions")).unwrap();
+        fs::write(
+            docs.join("symbols").join("thorn.md"),
+            "[Format By Specification](../primitive-functions/format-by-Specification.md)",
+        )
+        .unwrap();
+        // The real (lower-case) file exists; the link's capital S is the defect.
+        fs::write(
+            docs.join("primitive-functions")
+                .join("format-by-specification.md"),
+            "# Fmt",
+        )
+        .unwrap();
+
+        let lrg_mkdocs = r#"
+nav:
+  - Thorn: symbols/thorn.md
+  - Format: primitive-functions/format-by-specification.md
+"#;
+        fs::write(
+            root.join("language-reference-guide").join("mkdocs.yml"),
+            lrg_mkdocs,
+        )
+        .unwrap();
+        let root_mkdocs = r#"
+nav:
+  - Language Reference: '!include ./language-reference-guide/mkdocs.yml'
+"#;
+        fs::write(root.join("mkdocs.yml"), root_mkdocs).unwrap();
+        fs::write(root.join("help_urls.h"), "").unwrap();
+
+        let result = audit(&root.join("mkdocs.yml"), &root.join("help_urls.h")).unwrap();
+        assert_eq!(result.broken_links.len(), 1, "{:?}", result.broken_links);
+        assert_eq!(
+            result.broken_links[0].link,
+            "../primitive-functions/format-by-Specification.md"
+        );
+    }
+
+    /// The monorepo plugin mounts a subsite at slug(site_name), which may differ from the
+    /// directory name. A cross-subsite link using the slug must resolve to the directory
+    /// on disk (regression for the net-interface-guide false positives).
+    #[test]
+    fn test_cross_subsite_link_uses_site_name_slug() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+
+        let lrg = root.join("language-reference-guide").join("docs");
+        fs::create_dir_all(&lrg).unwrap();
+        fs::write(
+            lrg.join("glyphs.md"),
+            "see [Adv](../../net-interface-guide/dotnet-classes/advanced-techniques/)",
+        )
+        .unwrap();
+        fs::write(
+            root.join("language-reference-guide").join("mkdocs.yml"),
+            "site_name: Language Reference Guide\nnav:\n  - Glyphs: glyphs.md\n",
+        )
+        .unwrap();
+
+        // Directory is dotnet-interface-guide, but site_name slugifies to net-interface-guide.
+        let dni = root
+            .join("dotnet-interface-guide")
+            .join("docs")
+            .join("dotnet-classes");
+        fs::create_dir_all(&dni).unwrap();
+        fs::write(dni.join("advanced-techniques.md"), "# Adv").unwrap();
+        fs::write(
+            root.join("dotnet-interface-guide").join("mkdocs.yml"),
+            "site_name: .NET Interface Guide\nnav:\n  - Adv: dotnet-classes/advanced-techniques.md\n",
+        )
+        .unwrap();
+
+        fs::write(
+            root.join("mkdocs.yml"),
+            "nav:\n  - LRG: '!include ./language-reference-guide/mkdocs.yml'\n  - DNI: '!include ./dotnet-interface-guide/mkdocs.yml'\n",
+        )
+        .unwrap();
+        fs::write(root.join("help_urls.h"), "").unwrap();
+
+        let result = audit(&root.join("mkdocs.yml"), &root.join("help_urls.h")).unwrap();
+        assert!(result.broken_links.is_empty(), "{:?}", result.broken_links);
+    }
+
+    /// A page pulled in by several HELP_URL entries must be analysed once (not once per
+    /// entry), and a broken link on it should cite every help_urls.h line that references
+    /// it. Regression for the "40 reports from 2 links" duplication.
+    #[test]
+    fn test_help_url_broken_link_deduped_and_cites_lines() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let docs = root.join("guide").join("docs");
+        fs::create_dir_all(&docs).unwrap();
+        fs::write(docs.join("page.md"), "[bad](nonexistent)").unwrap();
+        fs::write(
+            root.join("guide").join("mkdocs.yml"),
+            "site_name: Guide\nnav:\n  - P: page.md\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("mkdocs.yml"),
+            "nav:\n  - G: '!include ./guide/mkdocs.yml'\n",
+        )
+        .unwrap();
+        // page.md is referenced by two HELP_URL entries (lines 2 and 3).
+        fs::write(
+            root.join("help_urls.h"),
+            "#define P \"guide/page\"\nHELP_URL(\"a\", P)\nHELP_URL(\"b\", P)\n",
+        )
+        .unwrap();
+
+        let result = audit(&root.join("mkdocs.yml"), &root.join("help_urls.h")).unwrap();
+        let bad: Vec<&BrokenLink> = result
+            .broken_links
+            .iter()
+            .filter(|b| b.link == "nonexistent.md")
+            .collect();
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected one report, got {:?}",
+            result.broken_links
+        );
+        let lines: Vec<usize> = bad[0].help_refs.iter().map(|r| r.line).collect();
+        assert_eq!(lines, vec![2, 3]);
+        assert_eq!(bad[0].help_refs[0].text, r#"HELP_URL("a", P)"#);
+        assert_eq!(bad[0].help_refs[1].text, r#"HELP_URL("b", P)"#);
+    }
+
+    /// `audit_traced` produces a per-file blow-by-blow for the requested targets:
+    /// discovery/role, per-link verdicts, and "NOT REACHED" for unreachable files.
+    #[test]
+    fn test_audit_traced_reports_processing() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let docs = root.join("guide").join("docs");
+        fs::create_dir_all(&docs).unwrap();
+        fs::write(docs.join("page.md"), "[bad](nonexistent) and [ok](other)").unwrap();
+        fs::write(docs.join("other.md"), "# Other").unwrap();
+        fs::write(docs.join("orphan.md"), "not linked from anywhere").unwrap();
+        fs::write(
+            root.join("guide").join("mkdocs.yml"),
+            "site_name: Guide\nnav:\n  - Page: page.md\n  - Other: other.md\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("mkdocs.yml"),
+            "nav:\n  - G: '!include ./guide/mkdocs.yml'\n",
+        )
+        .unwrap();
+        fs::write(root.join("help_urls.h"), "").unwrap();
+
+        let opts = TraceOptions {
+            targets: vec!["guide/docs/page.md".to_string(), "orphan.md".to_string()],
+        };
+        let (_res, trace) =
+            audit_traced(&root.join("mkdocs.yml"), &root.join("help_urls.h"), &opts).unwrap();
+        let t = trace.text;
+
+        // Reached, analysed page with one broken and one good link.
+        assert!(t.contains("FILE guide/docs/page.md"), "{t}");
+        assert!(t.contains("reached by     : nav"), "{t}");
+        assert!(t.contains("analysed       : true"), "{t}");
+        assert!(t.contains("LINK  nonexistent.md"), "{t}");
+        assert!(t.contains("BROKEN"), "{t}");
+        assert!(t.contains("resolved via"), "{t}"); // the [ok](other) link
+
+        // Orphan file: on disk but never reached, so its links are never checked.
+        assert!(t.contains("FILE guide/docs/orphan.md"), "{t}");
+        assert!(t.contains("NOT REACHED"), "{t}");
+
+        // No targets ⇒ no trace.
+        let (_r2, empty) = audit_traced(
+            &root.join("mkdocs.yml"),
+            &root.join("help_urls.h"),
+            &TraceOptions::default(),
+        )
+        .unwrap();
+        assert!(empty.text.is_empty());
+    }
+
     #[test]
     fn test_absolute_link_resolves() {
         // Absolute links (starting with /) resolve from site root
@@ -1926,11 +2940,7 @@ nav:
         fs::create_dir_all(&nested).unwrap();
 
         // Deep nested file links to root-level page with absolute path
-        fs::write(
-            nested.join("page.md"),
-            "see [Home](/guide/index.md)",
-        )
-        .unwrap();
+        fs::write(nested.join("page.md"), "see [Home](/guide/index.md)").unwrap();
         fs::write(guide_docs.join("index.md"), "# Home").unwrap();
 
         let mkdocs = r#"
@@ -1964,7 +2974,7 @@ nav:
 
         fs::write(
             docs.join("source.md"),
-            "see [Target](target)",  // no .md extension
+            "see [Target](target)", // no .md extension
         )
         .unwrap();
         fs::write(docs.join("target.md"), "# Target").unwrap();
@@ -1998,7 +3008,7 @@ nav:
 
         fs::write(
             docs.join("source.md"),
-            "see [Target](target/)",  // trailing slash
+            "see [Target](target/)", // trailing slash
         )
         .unwrap();
         fs::write(docs.join("target.md"), "# Target").unwrap();
@@ -2025,16 +3035,16 @@ nav:
     fn test_normalise_links_filters_correctly() {
         // Unit test for link normalisation logic
         let links = vec![
-            "page.md".to_string(),           // already has .md
-            "page".to_string(),              // needs .md added
-            "dir/page".to_string(),          // needs .md added
-            "page#anchor".to_string(),       // anchor should be stripped
-            "page.md#anchor".to_string(),    // anchor should be stripped
-            "https://example.com".to_string(), // external, should be dropped
+            "page.md".to_string(),                 // already has .md
+            "page".to_string(),                    // needs .md added
+            "dir/page".to_string(),                // needs .md added
+            "page#anchor".to_string(),             // anchor should be stripped
+            "page.md#anchor".to_string(),          // anchor should be stripped
+            "https://example.com".to_string(),     // external, should be dropped
             "mailto:test@example.com".to_string(), // mailto, should be dropped
-            "path/to/dir/".to_string(),      // trailing slash
-            "image.png".to_string(),         // non-md extension, should be dropped
-            "#just-anchor".to_string(),      // just anchor, should be dropped
+            "path/to/dir/".to_string(),            // trailing slash
+            "image.png".to_string(),               // non-md extension, should be dropped
+            "#just-anchor".to_string(),            // just anchor, should be dropped
         ];
 
         let normalised = normalise_links(links);
@@ -2136,7 +3146,10 @@ nav:
 
         // propertyapplies/accelerator.md should NOT be an orphan
         assert!(
-            !result.ghost.iter().any(|p| p.to_string_lossy().contains("propertyapplies")),
+            !result
+                .ghost
+                .iter()
+                .any(|p| p.to_string_lossy().contains("propertyapplies")),
             "propertyapplies/accelerator.md should not be an orphan"
         );
         assert!(result.broken_links.is_empty(), "{:?}", result.broken_links);
@@ -2154,6 +3167,10 @@ nav:
 \n\
 ![](img/status-window.png)\n";
         let refs = extract_image_refs(md);
-        assert_eq!(refs, vec!["img/status-window.png"], "image ref after HTML heading should be extracted");
+        assert_eq!(
+            refs,
+            vec!["img/status-window.png"],
+            "image ref after HTML heading should be extracted"
+        );
     }
 }

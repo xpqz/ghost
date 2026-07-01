@@ -1,5 +1,5 @@
 const { invoke } = window.__TAURI__.core;
-const { open } = window.__TAURI__.dialog;
+const { open, save } = window.__TAURI__.dialog;
 
 // Storage keys
 const STORAGE_MKDOCS = 'ghost_mkdocs_path';
@@ -31,6 +31,11 @@ const optHasImages = document.getElementById('opt-has-images');
 const optHasLinks = document.getElementById('opt-has-links');
 const optSummary = document.getElementById('opt-summary');
 const excludeInput = document.getElementById('exclude');
+const tracePathInput = document.getElementById('trace-path');
+const saveTraceBtn = document.getElementById('save-trace');
+
+// Most recent processing trace text (for the Save processing log button).
+let lastTrace = '';
 
 // Tab elements
 const tabAudit = document.getElementById('tab-audit');
@@ -211,7 +216,8 @@ runAuditBtn.addEventListener('click', async () => {
         has_images: optHasImages.checked,
         has_links: optHasLinks.checked,
         summary: optSummary.checked,
-        exclude: excludeInput.value.toLowerCase()
+        exclude: excludeInput.value.toLowerCase(),
+        trace: tracePathInput ? tracePathInput.value : ''
       }
     });
 
@@ -220,6 +226,8 @@ runAuditBtn.addEventListener('click', async () => {
       outputPre.textContent = result.output || '(no output)';
       displayRichOutput(result.items, result.counts, optSummary.checked);
       displayGitInfo(result.git_info);
+      lastTrace = result.trace || '';
+      if (saveTraceBtn) saveTraceBtn.style.display = lastTrace ? 'inline-block' : 'none';
     } else {
       countsDiv.innerHTML = `<div class="error">Error: ${result.error}</div>`;
       outputPre.textContent = '';
@@ -234,6 +242,23 @@ runAuditBtn.addEventListener('click', async () => {
     runAuditBtn.innerHTML = 'Run Audit';
   }
 });
+
+if (saveTraceBtn) {
+  saveTraceBtn.addEventListener('click', async () => {
+    if (!lastTrace) return;
+    try {
+      const path = await save({
+        defaultPath: 'ghost-trace.log',
+        filters: [{ name: 'Log', extensions: ['log', 'txt'] }]
+      });
+      if (path) {
+        await invoke('save_trace', { path, contents: lastTrace });
+      }
+    } catch (err) {
+      console.error('Failed to save trace:', err);
+    }
+  });
+}
 
 function displayCounts(counts) {
   const items = [
@@ -390,8 +415,14 @@ async function openInEditor(relativePath) {
 
 function renderBrokenLinksSection(title, links, sectionKey) {
   const listItems = links.map(bl => {
-    const marker = bl.from_help_url ? '<span class="help-url-marker">H</span>' : '';
-    return `<li class="issue-item">${marker}<a class="file-link" data-path="${escapeHtml(bl.from)}" title="Open in editor">${escapeHtml(bl.from)}</a><span class="issue-arrow">-></span><span class="issue-target">${escapeHtml(bl.link)}</span></li>`;
+    // For help-URL-sourced pages, show the actual HELP_URL(...) line(s) from help_urls.h
+    // in place of the page path so the entry can be located directly.
+    if (bl.help_refs && bl.help_refs.length) {
+      const text = bl.help_refs.map(r => r.text).join(' | ');
+      const lines = bl.help_refs.map(r => r.line).join(', ');
+      return `<li class="issue-item"><span class="help-url-marker" title="help_urls.h line ${lines}">H</span><code class="help-url-line">${escapeHtml(text)}</code><span class="issue-arrow">-></span><span class="issue-target">${escapeHtml(bl.link)}</span></li>`;
+    }
+    return `<li class="issue-item"><a class="file-link" data-path="${escapeHtml(bl.from)}" title="Open in editor">${escapeHtml(bl.from)}</a><span class="issue-arrow">-></span><span class="issue-target">${escapeHtml(bl.link)}</span></li>`;
   }).join('');
 
   return `
